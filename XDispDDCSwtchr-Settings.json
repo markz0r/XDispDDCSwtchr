@@ -1,0 +1,89 @@
+{
+  "backend": "cli",
+  "models": [
+    {
+      "name": "P2723QE",
+      "input_select": { "code": "0x60", "values": { "DP1": 15, "HDMI1": 17, "HDMI2": 18, "USB-C": 27 } }
+    },
+    {
+      "name": "U4025QW",
+      "input_select": { "code": "0x60", "values": { "DP1": 15, "DP2": 16, "HDMI1": 17, "HDMI2": 18, "USB-C": 27 } },
+      "pip": {
+        "toggle_code": "0xE3",
+        "on_value": 1,
+        "off_value": 0,
+        "sources": ["HDMI1", "HDMI2", "DP1", "DP2", "USB-C"],
+        "positions": ["TopLeft", "TopRight", "BottomLeft", "BottomRight"],
+        "sizes": ["Small", "Medium", "Large"],
+        "swap_code": "0xE4",
+        "swap_value": 1,
+        "source_code": "0xE5",
+        "position_code": "0xE6",
+        "size_code": "0xE7"
+      },
+      "vcp_named_values": {
+        "PIP_Source_HDMI1": 17,
+        "PIP_Source_HDMI2": 18,
+        "PIP_Source_DP1": 15,
+        "PIP_Source_DP2": 16,
+        "PIP_Source_USB-C": 27,
+        "PIP_Pos_TopLeft": 1,
+        "PIP_Pos_TopRight": 2,
+        "PIP_Pos_BottomLeft": 3,
+        "PIP_Pos_BottomRight": 4,
+        "PIP_Size_Small": 1,
+        "PIP_Size_Medium": 2,
+        "PIP_Size_Large": 3
+      }
+    },
+    {
+      "name": "U3225QE",
+      "input_select": { "code": "0x60", "values": { "DP1": 15, "HDMI1": 17, "HDMI2": 18, "USB-C": 27 } },
+      "pip": {
+        "toggle_code": "0xE3",
+        "on_value": 1,
+        "off_value": 0,
+        "sources": ["HDMI1", "HDMI2", "DP1", "USB-C"],
+        "positions": ["TopLeft", "TopRight", "BottomLeft", "BottomRight"],
+        "sizes": ["Small", "Medium", "Large"],
+        "swap_code": "0xE4",
+        "swap_value": 1,
+        "source_code": "0xE5",
+        "position_code": "0xE6",
+        "size_code": "0xE7"
+      },
+      "vcp_named_values": {
+        "PIP_Source_HDMI1": 17,
+        "PIP_Source_HDMI2": 18,
+        "PIP_Source_DP1": 15,
+        "PIP_Source_USB-C": 27,
+        "PIP_Pos_TopLeft": 1,
+        "PIP_Pos_TopRight": 2,
+        "PIP_Pos_BottomLeft": 3,
+        "PIP_Pos_BottomRight": 4,
+        "PIP_Size_Small": 1,
+        "PIP_Size_Medium": 2,
+        "PIP_Size_Large": 3
+      }
+    }
+  ],
+  "monitors": [
+    { "identifier": "Primary", "model": "U4025QW" },
+    { "identifier": "Left",    "model": "P2723QE" },
+    { "identifier": "Right",   "model": "U3225QE" }
+  ],
+  "hotkeys": [
+    { "keys": "ctrl+alt+1", "action": "SetInputSource",   "args": {"source": "USB-C"}, "target": "Primary" },
+    { "keys": "ctrl+alt+2", "action": "NextInputSource",                          "target": "Primary" },
+    { "keys": "ctrl+alt+p", "action": "TogglePIP",                                  "target": "Primary" },
+    { "keys": "ctrl+alt+o", "action": "NextPIPSource",                              "target": "Primary" },
+    { "keys": "ctrl+alt+[", "action": "NextPIPPosition",                            "target": "Primary" },
+    { "keys": "ctrl+alt+]", "action": "NextPIPSize",                                "target": "Primary" },
+    { "keys": "ctrl+alt+s", "action": "SwapPIP",                                   "target": "Primary" }
+  ],
+  "cli": {
+    "linux_ddcutil_path": "ddcutil",
+    "mac_ddcctl_path": "ddcctl",
+    "win_controlmymonitor_path": "ControlMyMonitor.exe"
+  }
+}
