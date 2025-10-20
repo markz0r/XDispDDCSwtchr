@@ -16,13 +16,15 @@ import (
 
 type winNative struct{}
 
-func NewWinNative() *winNative { return &winNative{} }
+func NewWinNative() Backend { return &winNative{} }
 
 func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error {
 	// Parse hex code like "0x60"
 	var code uint32
 	_, err := fmt.Sscanf(vcpCode, "0x%X", &code)
-	if err != nil { return fmt.Errorf("bad vcp code '%s': %w", vcpCode, err) }
+	if err != nil {
+		return fmt.Errorf("bad vcp code '%s': %w", vcpCode, err)
+	}
 
 	// Load DLLs
 	user32 := windows.NewLazySystemDLL("user32.dll")
@@ -51,12 +53,14 @@ func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error
 	if monitorID != "" {
 		var i int
 		_, err := fmt.Sscanf(monitorID, "DISPLAY%d", &i)
-		if err == nil && i >= 1 { targetIndex = i - 1 }
+		if err == nil && i >= 1 {
+			targetIndex = i - 1
+		}
 	}
 
 	var chosen HMONITOR
 	index := 0
-	cb := windows.NewCallback(func(hMon HMONITOR, hdc HDC, lprc *struct{left,top,right,bottom int32}, data uintptr) uintptr {
+	cb := windows.NewCallback(func(hMon HMONITOR, hdc HDC, lprc *struct{ left, top, right, bottom int32 }, data uintptr) uintptr {
 		if targetIndex == -1 || index == targetIndex {
 			chosen = hMon
 			return 0 // stop enumeration
@@ -80,16 +84,22 @@ func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error
 	if ret == 0 {
 		return fmt.Errorf("GetNumberOfPhysicalMonitorsFromHMONITOR failed: %v", callErr)
 	}
-	if count == 0 { return errors.New("no physical monitors") }
+	if count == 0 {
+		return errors.New("no physical monitors")
+	}
 
 	arr := make([]PHYSICAL_MONITOR, count)
 	ret, _, callErr = procGetPhysicalMonitorsFromHMONITOR.Call(uintptr(chosen), uintptr(count), uintptr(unsafe.Pointer(&arr[0])))
-	if ret == 0 { return fmt.Errorf("GetPhysicalMonitorsFromHMONITOR failed: %v", callErr) }
+	if ret == 0 {
+		return fmt.Errorf("GetPhysicalMonitorsFromHMONITOR failed: %v", callErr)
+	}
 	defer procDestroyPhysicalMonitors.Call(uintptr(count), uintptr(unsafe.Pointer(&arr[0])))
 
 	// For simplicity, act on the first physical monitor on that HMONITOR
 	pm := arr[0]
 	ret, _, callErr = procSetVCPFeature.Call(uintptr(pm.Handle), uintptr(code), uintptr(value))
-	if ret == 0 { return fmt.Errorf("SetVCPFeature failed: %v", callErr) }
+	if ret == 0 {
+		return fmt.Errorf("SetVCPFeature failed: %v", callErr)
+	}
 	return nil
 }

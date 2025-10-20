@@ -24,4 +24,3 @@ func MakeNative(cfg *config.Settings) (Backend, error) {
 		return nil, fmt.Errorf("no native backend for %s", runtime.GOOS)
 	}
 }
-

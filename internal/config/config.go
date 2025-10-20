@@ -66,7 +66,9 @@ type Settings struct {
 
 func Load(path string) (*Settings, error) {
 	b, err := os.ReadFile(path)
-	if err != nil { return nil, fmt.Errorf("read settings: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
 	var s Settings
 	if err := json.Unmarshal(b, &s); err != nil {
 		return nil, fmt.Errorf("parse settings: %w", err)

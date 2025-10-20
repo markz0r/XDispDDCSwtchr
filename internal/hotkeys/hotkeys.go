@@ -16,13 +16,22 @@ func Register(bindings map[string]Handler) func() {
 		for e := range evChan {
 			switch e.Kind {
 			case hook.KeyDown:
-				k := strings.ToLower(e.Keychar)
+				k := normalizeKey(e)
+				if k == "" {
+					continue
+				}
 				pressed[k] = true
 				for combo, handler := range bindings {
-					if matchCombo(combo, pressed) { go handler() }
+					if matchCombo(combo, pressed) {
+						go handler()
+					}
 				}
 			case hook.KeyUp:
-				delete(pressed, strings.ToLower(e.Keychar))
+				k := normalizeKey(e)
+				if k == "" {
+					continue
+				}
+				delete(pressed, k)
 			}
 		}
 	}()
@@ -32,8 +41,19 @@ func Register(bindings map[string]Handler) func() {
 func matchCombo(combo string, pressed map[string]bool) bool {
 	parts := strings.Split(strings.ToLower(combo), "+")
 	for _, p := range parts {
-		if !pressed[p] { return false }
+		if !pressed[p] {
+			return false
+		}
 	}
 	return true
 }
 
+func normalizeKey(e hook.Event) string {
+	if e.Keychar != 0 {
+		return strings.ToLower(string(e.Keychar))
+	}
+	if e.Keycode != 0 {
+		return strings.ToLower(hook.RawcodetoKeychar(e.Keycode))
+	}
+	return ""
+}
