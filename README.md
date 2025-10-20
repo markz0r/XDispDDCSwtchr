@@ -12,6 +12,10 @@ Cross‑platform hotkey → DDC/CI switcher.
 2) Build and run:
 
 ```bash
+# Linux prerequisites for hotkey support
+sudo apt-get install libx11-xcb-dev libxtst-dev libxkbcommon-dev libxkbcommon-x11-dev \
+     libxinerama-dev libxrandr-dev libxcursor-dev
+
 # Linux/macOS
 go build -o xdispddcswtchr ./cmd/xdispddcswtchr
 ./xdispddcswtchr

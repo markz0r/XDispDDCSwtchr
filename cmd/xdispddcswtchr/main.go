@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"runtime"
 
@@ -12,22 +13,17 @@ import (
 
 func main() {
 	cfg, err := config.Load("XDispDDCSwtchr-Settings.json")
-	if err != nil { log.Fatal(err) }
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	var backend ddc.Backend
-	switch cfg.Backend {
-	case config.BackendCLI:
-		backend = makeCLI(cfg)
-	case config.BackendNative:
-		b, err := ddc.MakeNative(cfg)
-		if err != nil { log.Fatalf("native backend unavailable: %v", err) }
-		cmd/xdispddcswtchr/main.gobackend = b
-	default:
-		log.Fatalf("unsupported backend: %s", cfg.Backend)
+	backend, err := selectBackend(cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	engine := logic.NewEngine(cfg, backend)
-	binds := map[string]func(){}
+	binds := map[string]hotkeys.Handler{}
 	for _, hk := range cfg.Hotkeys {
 		h := hk
 		binds[h.Keys] = func() {
@@ -45,6 +41,27 @@ func main() {
 	select {}
 }
 
+func selectBackend(cfg *config.Settings) (ddc.Backend, error) {
+	backend := cfg.Backend
+	if backend == "" {
+		backend = config.BackendCLI
+	}
+	cfg.Backend = backend
+
+	switch backend {
+	case config.BackendCLI:
+		return makeCLI(cfg), nil
+	case config.BackendNative:
+		b, err := ddc.MakeNative(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("native backend unavailable: %w", err)
+		}
+		return b, nil
+	default:
+		return nil, fmt.Errorf("unsupported backend: %s", backend)
+	}
+}
+
 func makeCLI(cfg *config.Settings) ddc.Backend {
 	switch runtime.GOOS {
 	case "windows":
@@ -55,8 +72,7 @@ func makeCLI(cfg *config.Settings) ddc.Backend {
 			MacDdcctlPath:    cfg.CLI.MacDdcctlPath,
 		}
 	default:
-		log.Fatal("unsupported OS for CLI backend")
+		log.Fatalf("unsupported OS %s for CLI backend", runtime.GOOS)
 		return nil
 	}
 }
-

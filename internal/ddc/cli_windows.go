@@ -9,14 +9,16 @@ import (
 )
 
 type CLIBackend struct {
-	LinuxDdcutilPath string // ignored on windows
-	MacDdcctlPath    string // ignored on windows
+	LinuxDdcutilPath    string // ignored on windows
+	MacDdcctlPath       string // ignored on windows
 	WinControlMyMonPath string
 }
 
 func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) error {
 	tool := b.WinControlMyMonPath
-	if tool == "" { tool = "ControlMyMonitor.exe" }
+	if tool == "" {
+		tool = "ControlMyMonitor.exe"
+	}
 	cmd := exec.Command(tool, "/SetValue", monitorID, vcpCode, fmt.Sprint(value))
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -25,4 +27,3 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 	}
 	return nil
 }
-

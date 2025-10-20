@@ -17,4 +17,3 @@ func NewDarwinNative() (Backend, error) {
 func (d *darwinNative) SetVCP(monitorID string, vcpCode string, value uint16) error {
 	return fmt.Errorf("native macOS DDC not implemented")
 }
-
