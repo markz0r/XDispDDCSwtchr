@@ -7,8 +7,29 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"time"
 )
+
+// Security: Validate inputs to prevent command injection
+var (
+	safeMonitorIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.\\-]+$`)
+	safeVCPCodeRegex   = regexp.MustCompile(`^(0x)?[0-9a-fA-F]+$`)
+)
+
+func validateInputSafety(monitorID, vcpCode string, value uint16) error {
+	// Monitor ID should only contain safe characters (Windows allows backslashes in device paths)
+	if monitorID != "" && !safeMonitorIDRegex.MatchString(monitorID) {
+		return fmt.Errorf("invalid monitor ID '%s': contains unsafe characters", monitorID)
+	}
+
+	// VCP code should only be hex/decimal
+	if !safeVCPCodeRegex.MatchString(vcpCode) {
+		return fmt.Errorf("invalid VCP code '%s': must be hex (0x60) or decimal (96)", vcpCode)
+	}
+
+	return nil
+}
 
 type CLIBackend struct {
 	LinuxDdcutilPath    string // ignored on windows
@@ -17,6 +38,11 @@ type CLIBackend struct {
 }
 
 func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) error {
+	// Security: Validate inputs to prevent command injection
+	if err := validateInputSafety(monitorID, vcpCode, value); err != nil {
+		return err
+	}
+
 	tool := b.WinControlMyMonPath
 	if tool == "" {
 		tool = "ControlMyMonitor.exe"

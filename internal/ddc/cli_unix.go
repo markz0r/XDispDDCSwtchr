@@ -16,6 +16,26 @@ import (
 	"time"
 )
 
+// Security: Validate inputs to prevent command injection
+var (
+	safeMonitorIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_@#-]+$`)
+	safeVCPCodeRegex   = regexp.MustCompile(`^(0x)?[0-9a-fA-F]+$`)
+)
+
+func validateInputSafety(monitorID, vcpCode string, value uint16) error {
+	// Monitor ID should only contain safe characters
+	if monitorID != "" && !safeMonitorIDRegex.MatchString(monitorID) {
+		return fmt.Errorf("invalid monitor ID '%s': contains unsafe characters", monitorID)
+	}
+
+	// VCP code should only be hex/decimal
+	if !safeVCPCodeRegex.MatchString(vcpCode) {
+		return fmt.Errorf("invalid VCP code '%s': must be hex (0x60) or decimal (96)", vcpCode)
+	}
+
+	return nil
+}
+
 type CLIBackend struct {
 	LinuxDdcutilPath    string
 	MacDdcctlPath       string
@@ -23,6 +43,11 @@ type CLIBackend struct {
 }
 
 func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) error {
+	// Security: Validate inputs to prevent command injection
+	if err := validateInputSafety(monitorID, vcpCode, value); err != nil {
+		return err
+	}
+
 	// Validate VCP code format
 	normalizedCode := normalizeVCPCode(vcpCode)
 	if normalizedCode == "" {
@@ -90,15 +115,50 @@ func runCommand(tool string, args ...string) error {
 }
 
 func runCommandWithTimeout(tool string, timeout time.Duration, args ...string) error {
-	stdout, stderr, err := runCommandCaptureWithTimeout(tool, timeout, args...)
-	if err != nil {
-		hint := darwinDDCctlHint(stdout, stderr)
-		if hint != "" {
-			return fmt.Errorf("exec %s %s: %v (stdout=%q stderr=%q) hint=%s", tool, strings.Join(args, " "), err, stdout, stderr, hint)
+	// Retry up to 3 times with exponential backoff for transient failures
+	const maxRetries = 3
+	var lastErr error
+	var lastStdout, lastStderr string
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 100ms, 200ms, 400ms
+			backoff := time.Duration(100<<uint(attempt-1)) * time.Millisecond
+			log.Printf("retrying command after %v (attempt %d/%d)", backoff, attempt+1, maxRetries)
+			time.Sleep(backoff)
 		}
-		return fmt.Errorf("exec %s %s: %v (stdout=%q stderr=%q)", tool, strings.Join(args, " "), err, stdout, stderr)
+
+		stdout, stderr, err := runCommandCaptureWithTimeout(tool, timeout, args...)
+		lastStdout, lastStderr = stdout, stderr
+
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+
+		// Don't retry on timeout
+		if strings.Contains(err.Error(), "timed out") {
+			break
+		}
+
+		// Check for transient errors that warrant retry
+		msg := strings.ToLower(stdout + stderr)
+		if strings.Contains(msg, "busy") ||
+			strings.Contains(msg, "in use") ||
+			strings.Contains(msg, "try again") {
+			continue
+		}
+
+		// If not a transient error, don't retry
+		break
 	}
-	return nil
+
+	hint := darwinDDCctlHint(lastStdout, lastStderr)
+	if hint != "" {
+		return fmt.Errorf("exec %s %s: %v hint=%s", tool, strings.Join(args, " "), lastErr, hint)
+	}
+	return fmt.Errorf("exec %s %s: %v", tool, strings.Join(args, " "), lastErr)
 }
 
 func runCommandCapture(tool string, args ...string) (string, string, error) {
