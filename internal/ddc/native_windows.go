@@ -5,6 +5,8 @@ package ddc
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -19,11 +21,23 @@ type winNative struct{}
 func NewWinNative() Backend { return &winNative{} }
 
 func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error {
-	// Parse hex code like "0x60"
+	// Parse VCP code - support both hex (0x60) and decimal (96) formats
 	var code uint32
-	_, err := fmt.Sscanf(vcpCode, "0x%X", &code)
-	if err != nil {
-		return fmt.Errorf("bad vcp code '%s': %w", vcpCode, err)
+	vcpCode = strings.TrimSpace(vcpCode)
+
+	// Try hex format first
+	if strings.HasPrefix(strings.ToLower(vcpCode), "0x") {
+		_, err := fmt.Sscanf(vcpCode, "0x%X", &code)
+		if err != nil {
+			return fmt.Errorf("bad vcp code '%s': %w", vcpCode, err)
+		}
+	} else {
+		// Try decimal format
+		n, err := strconv.ParseUint(vcpCode, 10, 32)
+		if err != nil {
+			return fmt.Errorf("bad vcp code '%s': must be hex (0x60) or decimal (96): %w", vcpCode, err)
+		}
+		code = uint32(n)
 	}
 
 	// Load DLLs
@@ -95,7 +109,9 @@ func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error
 	}
 	defer procDestroyPhysicalMonitors.Call(uintptr(count), uintptr(unsafe.Pointer(&arr[0])))
 
-	// For simplicity, act on the first physical monitor on that HMONITOR
+	// For simplicity, act on the first physical monitor on that HMONITOR.
+	// Note: If multiple physical monitors exist on this HMONITOR (count > 1), only the first is controlled.
+	// This is a known limitation of the current implementation.
 	pm := arr[0]
 	ret, _, callErr = procSetVCPFeature.Call(uintptr(pm.Handle), uintptr(code), uintptr(value))
 	if ret == 0 {
