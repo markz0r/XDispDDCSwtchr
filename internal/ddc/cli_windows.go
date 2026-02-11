@@ -13,7 +13,7 @@ import (
 
 // Security: Validate inputs to prevent command injection
 var (
-	safeMonitorIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.\\-]+$`)
+	safeMonitorIDRegex = regexp.MustCompile(`^[a-zA-Z0-9_.\-]+$`)
 	safeVCPCodeRegex   = regexp.MustCompile(`^(0x)?[0-9a-fA-F]+$`)
 )
 

@@ -65,14 +65,11 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 			log.Printf("ddcutil: setting VCP %s=%d (monitor ID ignored, affects all monitors)", vcpCode, value)
 		}
 
-		cmd := exec.Command(tool, "setvcp", vcpCode, fmt.Sprint(value))
-		var out, errb bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &out, &errb
-
 		// Add timeout to prevent hanging
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd = exec.CommandContext(ctx, tool, "setvcp", vcpCode, fmt.Sprint(value))
+		cmd := exec.CommandContext(ctx, tool, "setvcp", vcpCode, fmt.Sprint(value))
+		var out, errb bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &errb
 
 		if err := cmd.Run(); err != nil {
