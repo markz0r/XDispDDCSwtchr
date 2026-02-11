@@ -60,9 +60,9 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 		if tool == "" {
 			tool = "ddcutil"
 		}
-		// Validate monitor ID if provided
+		// Note: ddcutil doesn't support monitor ID in setvcp command, affects all monitors
 		if monitorID != "" {
-			log.Printf("ddcutil: setting VCP %s=%d (monitor ID ignored, affects all monitors)", vcpCode, value)
+			log.Printf("warning: ddcutil ignores monitor ID '%s', command affects all monitors", monitorID)
 		}
 
 		// Add timeout to prevent hanging
@@ -119,8 +119,8 @@ func runCommandWithTimeout(tool string, timeout time.Duration, args ...string) e
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff sequence: 100ms, 200ms, 400ms
-			// Formula: 100 * (2^(attempt-1)) milliseconds
+			// Exponential backoff: 100ms, 200ms, 400ms
+			// Formula: 100ms * (1 << (attempt-1)) = 100ms * 2^(attempt-1)
 			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
 			log.Printf("retrying command after %v (attempt %d/%d)", backoff, attempt+1, maxRetries)
 			time.Sleep(backoff)

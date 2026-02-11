@@ -5,7 +5,6 @@ package ddc
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -110,11 +109,9 @@ func (w *winNative) SetVCP(monitorID string, vcpCode string, value uint16) error
 	}
 	defer procDestroyPhysicalMonitors.Call(uintptr(count), uintptr(unsafe.Pointer(&arr[0])))
 
-	// For simplicity, act on the first physical monitor on that HMONITOR
-	// Note: If multiple physical monitors exist on this HMONITOR, only the first is controlled
-	if count > 1 {
-		log.Printf("warning: multiple physical monitors (%d) detected on HMONITOR, controlling first only", count)
-	}
+	// For simplicity, act on the first physical monitor on that HMONITOR.
+	// Note: If multiple physical monitors exist on this HMONITOR (count > 1), only the first is controlled.
+	// This is a known limitation of the current implementation.
 	pm := arr[0]
 	ret, _, callErr = procSetVCPFeature.Call(uintptr(pm.Handle), uintptr(code), uintptr(value))
 	if ret == 0 {
