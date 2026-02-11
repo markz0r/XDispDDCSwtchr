@@ -3,6 +3,7 @@ package logic
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/markz0r/XDispDDCSwtchr/internal/config"
@@ -21,9 +22,10 @@ func NewEngine(cfg *config.Settings, backend ddc.Backend) *Engine {
 
 func (e *Engine) monitorModel(monitorID string) (*config.Model, error) {
 	var modelName string
+	lookupID := logicalMonitorID(monitorID)
 	if monitorID != "" {
 		for _, m := range e.cfg.Monitors {
-			if m.Identifier == monitorID {
+			if m.Identifier == lookupID {
 				modelName = m.Model
 				break
 			}
@@ -40,6 +42,17 @@ func (e *Engine) monitorModel(monitorID string) (*config.Model, error) {
 		}
 	}
 	return nil, fmt.Errorf("model not found: %s", modelName)
+}
+
+func logicalMonitorID(target string) string {
+	sep := strings.LastIndexAny(target, "@#")
+	if sep <= 0 || sep >= len(target)-1 {
+		return target
+	}
+	if _, err := strconv.Atoi(target[sep+1:]); err != nil {
+		return target
+	}
+	return target[:sep]
 }
 
 func (e *Engine) setInputSource(monitorID, sourceName string) error {

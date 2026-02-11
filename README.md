@@ -18,6 +18,7 @@ sudo apt-get install libx11-xcb-dev libxtst-dev libxkbcommon-dev libxkbcommon-x1
 
 # Linux/macOS
 go build -o xdispddcswtchr ./cmd/xdispddcswtchr
+sudo ln -sfn /Library/Preferences/com.apple.windowserver.displays.plist /Library/Preferences/com.apple.windowserver.plist
 ./xdispddcswtchr
 ```
 
