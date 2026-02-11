@@ -119,8 +119,9 @@ func runCommandWithTimeout(tool string, timeout time.Duration, args ...string) e
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 100ms, 200ms, 400ms
-			backoff := time.Duration(100<<uint(attempt-1)) * time.Millisecond
+			// Exponential backoff sequence: 100ms, 200ms, 400ms
+			// Formula: 100 * (2^(attempt-1)) milliseconds
+			backoff := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
 			log.Printf("retrying command after %v (attempt %d/%d)", backoff, attempt+1, maxRetries)
 			time.Sleep(backoff)
 		}
@@ -252,7 +253,9 @@ func normalizeVCPCode(vcpCode string) string {
 	// Support both hex (0x60) and decimal (96) formats
 	s = strings.TrimPrefix(s, "0x")
 
-	// Validate it's a valid hex string
+	// Validate it's a valid hex string (using 16-bit to accommodate extended VCP codes)
+	// Standard VCP codes are 8-bit (0x00-0xFF), but some extended codes use 16-bit
+	// Reference: VESA MCCS standard supports codes up to 0xFFFF for manufacturer-specific features
 	if _, err := strconv.ParseUint(s, 16, 16); err != nil {
 		return ""
 	}
