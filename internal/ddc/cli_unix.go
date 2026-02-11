@@ -4,13 +4,16 @@ package ddc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type CLIBackend struct {
@@ -20,16 +23,37 @@ type CLIBackend struct {
 }
 
 func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) error {
+	// Validate VCP code format
+	normalizedCode := normalizeVCPCode(vcpCode)
+	if normalizedCode == "" {
+		return fmt.Errorf("invalid VCP code '%s': must be hex (0x60) or decimal (96)", vcpCode)
+	}
+
 	switch runtime.GOOS {
 	case "linux":
 		tool := b.LinuxDdcutilPath
 		if tool == "" {
 			tool = "ddcutil"
 		}
+		// Validate monitor ID if provided
+		if monitorID != "" {
+			log.Printf("ddcutil: setting VCP %s=%d (monitor ID ignored, affects all monitors)", vcpCode, value)
+		}
+
 		cmd := exec.Command(tool, "setvcp", vcpCode, fmt.Sprint(value))
 		var out, errb bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &out, &errb
+
+		// Add timeout to prevent hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cmd = exec.CommandContext(ctx, tool, "setvcp", vcpCode, fmt.Sprint(value))
+		cmd.Stdout, cmd.Stderr = &out, &errb
+
 		if err := cmd.Run(); err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return fmt.Errorf("ddcutil timed out after 30s - monitor may not support DDC/CI")
+			}
 			return fmt.Errorf("ddcutil failed: %v (%s)", err, errb.String())
 		}
 		return nil
@@ -38,18 +62,21 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 		if tool == "" {
 			tool = "ddcctl"
 		}
-		displayID := darwinDisplayID(tool, monitorID)
+		displayID, err := darwinDisplayID(tool, monitorID)
+		if err != nil {
+			return fmt.Errorf("failed to resolve monitor ID '%s': %w", monitorID, err)
+		}
 
 		code := normalizeVCPCode(vcpCode)
 		if code == "60" {
 			// Common ddcctl builds use -i to select input source.
-			if err := runCommand(tool, "-d", displayID, "-i", fmt.Sprint(value)); err != nil {
+			if err := runCommandWithTimeout(tool, 30*time.Second, "-d", displayID, "-i", fmt.Sprint(value)); err != nil {
 				return fmt.Errorf("ddcctl input switch failed: %w", err)
 			}
 			return nil
 		}
 
-		if err := runCommand(tool, "-d", displayID, "-c", vcpCode, "-v", fmt.Sprint(value)); err != nil {
+		if err := runCommandWithTimeout(tool, 30*time.Second, "-d", displayID, "-c", vcpCode, "-v", fmt.Sprint(value)); err != nil {
 			return fmt.Errorf("ddcctl generic VCP failed: %w", err)
 		}
 		return nil
@@ -59,7 +86,11 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 }
 
 func runCommand(tool string, args ...string) error {
-	stdout, stderr, err := runCommandCapture(tool, args...)
+	return runCommandWithTimeout(tool, 30*time.Second, args...)
+}
+
+func runCommandWithTimeout(tool string, timeout time.Duration, args ...string) error {
+	stdout, stderr, err := runCommandCaptureWithTimeout(tool, timeout, args...)
 	if err != nil {
 		hint := darwinDDCctlHint(stdout, stderr)
 		if hint != "" {
@@ -71,35 +102,50 @@ func runCommand(tool string, args ...string) error {
 }
 
 func runCommandCapture(tool string, args ...string) (string, string, error) {
-	cmd := exec.Command(tool, args...)
+	return runCommandCaptureWithTimeout(tool, 30*time.Second, args...)
+}
+
+func runCommandCaptureWithTimeout(tool string, timeout time.Duration, args ...string) (string, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, tool, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", "", fmt.Errorf("command timed out after %v", timeout)
+	}
+
 	return strings.TrimSpace(out.String()), strings.TrimSpace(errb.String()), err
 }
 
-func darwinDisplayID(tool, monitorID string) string {
+func darwinDisplayID(tool, monitorID string) (string, error) {
 	const fallback = "1"
 	trimmed := strings.TrimSpace(monitorID)
 	if trimmed == "" {
-		return fallback
+		log.Printf("warning: no monitor ID specified, using default display 1")
+		return fallback, nil
 	}
 
 	if _, err := strconv.Atoi(trimmed); err == nil {
-		return mapDarwinDisplayArg(tool, trimmed)
+		return mapDarwinDisplayArg(tool, trimmed), nil
 	}
 
 	sep := strings.LastIndexAny(trimmed, "@#")
 	if sep <= 0 || sep >= len(trimmed)-1 {
-		return fallback
+		log.Printf("warning: could not parse monitor ID '%s', using default display 1", trimmed)
+		return fallback, nil
 	}
 
 	candidate := trimmed[sep+1:]
 	if _, err := strconv.Atoi(candidate); err == nil {
-		return mapDarwinDisplayArg(tool, candidate)
+		return mapDarwinDisplayArg(tool, candidate), nil
 	}
 
-	return fallback
+	log.Printf("warning: could not extract display number from '%s', using default display 1", trimmed)
+	return fallback, nil
 }
 
 func mapDarwinDisplayArg(tool, requested string) string {
@@ -142,7 +188,18 @@ func darwinDispIDs(tool string) []string {
 
 func normalizeVCPCode(vcpCode string) string {
 	s := strings.TrimSpace(strings.ToLower(vcpCode))
+	if s == "" {
+		return ""
+	}
+
+	// Support both hex (0x60) and decimal (96) formats
 	s = strings.TrimPrefix(s, "0x")
+
+	// Validate it's a valid hex string
+	if _, err := strconv.ParseUint(s, 16, 16); err != nil {
+		return ""
+	}
+
 	return s
 }
 

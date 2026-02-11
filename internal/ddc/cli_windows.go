@@ -4,8 +4,10 @@ package ddc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
+	"time"
 )
 
 type CLIBackend struct {
@@ -19,11 +21,25 @@ func (b *CLIBackend) SetVCP(monitorID string, vcpCode string, value uint16) erro
 	if tool == "" {
 		tool = "ControlMyMonitor.exe"
 	}
-	cmd := exec.Command(tool, "/SetValue", monitorID, vcpCode, fmt.Sprint(value))
+
+	// Validate VCP code format (support both 0x60 and 96)
+	if vcpCode == "" {
+		return fmt.Errorf("invalid VCP code: empty")
+	}
+
+	// Add timeout to prevent hanging
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, tool, "/SetValue", monitorID, vcpCode, fmt.Sprint(value))
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
+
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ControlMyMonitor failed: %v (%s)", err, errb.String())
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("ControlMyMonitor timed out after 30s - monitor may not support DDC/CI")
+		}
+		return fmt.Errorf("ControlMyMonitor failed: %v (stdout=%s stderr=%s)", err, out.String(), errb.String())
 	}
 	return nil
 }
