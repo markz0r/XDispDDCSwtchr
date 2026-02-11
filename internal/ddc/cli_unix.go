@@ -180,6 +180,9 @@ func runCommandCaptureWithTimeout(tool string, timeout time.Duration, args ...st
 }
 
 func darwinDisplayID(tool, monitorID string) (string, error) {
+	// Note: This function intentionally falls back to default display instead of returning errors
+	// to provide graceful degradation when monitor IDs are ambiguous or unparseable.
+	// The error return is reserved for future use or critical validation failures.
 	const fallback = "1"
 	trimmed := strings.TrimSpace(monitorID)
 	if trimmed == "" {
