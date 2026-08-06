@@ -1,94 +1,121 @@
 # XDispDDCSwtchr
 
-Cross‑platform hotkey → DDC/CI switcher.
+`xdispddcswtchr` is a terminal application and command-line tool for switching
+the input source of external monitors through DDC/CI VCP `0x60`.
 
-- ✅ CLI backends: `ddcutil` (Linux), `ddcctl` (macOS), `ControlMyMonitor.exe` (Windows)
-- ✅ JSON configuration of models, monitors, and hotkeys
-- 🔄 Native backends scaffolding: Windows (implemented), macOS/Linux (stubs)
+The production binary talks directly to native operating-system interfaces. It
+does not execute or depend on `ControlMyMonitor.exe`, `ddcutil`, `ddcctl`, or
+another monitor-control utility. Global hotkeys, PIP controls, and arbitrary VCP
+writes are intentionally outside the product scope.
 
-## Quick start
+## Current implementation status
 
-1) Edit `XDispDDCSwtchr-Settings.json`.
-2) Build and run:
+| Slice | State |
+| --- | --- |
+| macOS 26.6, Apple Silicon native discovery and VCP `0x60` read | Implemented and read-validated on the attached Dell S3423DWC and Dell U4025QW |
+| macOS input write | Implemented behind qualification and support-record gates; physical qualification is not yet complete |
+| Windows native backend | Planned, not implemented in this incremental slice |
+| Linux native backend | Planned, not implemented in this incremental slice |
 
-```bash
-# Linux prerequisites for hotkey support
-sudo apt install libx11-xcb-dev libxtst-dev libxkbcommon-dev libxkbcommon-x11-dev \
-     libxinerama-dev libxrandr-dev libxcursor-dev
-sudo apt install -y ddcutil
+An implemented backend is not automatically a supported hardware claim. Normal
+writes are enabled only when the exact OS build, architecture, application
+commit, backend, profile, EDID hash, connector, and qualified input appear in
+the embedded support matrix. Otherwise the display remains
+`backend-experimental` and the normal CLI/TUI refuses to write.
 
-# macos prerequisits
-brew install ddcctl
+## Build
 
-# Linux/macOS
-go build -o xdispddcswtchr ./cmd/xdispddcswtchr
-sudo ln -sfn /Library/Preferences/com.apple.windowserver.displays.plist /Library/Preferences/com.apple.windowserver.plist
-./xdispddcswtchr
+Go 1.26.5 is the pinned toolchain. Bubble Tea v2.0.8 is the only direct runtime
+dependency.
+
+```sh
+go build -trimpath -o xdispddcswtchr ./cmd/xdispddcswtchr
+./xdispddcswtchr version
 ```
+
+Run `./xdispddcswtchr` from a terminal for the Bubble Tea interface. In a
+non-interactive stream, specify a CLI command.
+
+## Commands
+
+```text
+xdispddcswtchr list [--json]
+xdispddcswtchr input list --monitor <stable-id> [--json]
+xdispddcswtchr input get --monitor <stable-id> [--json]
+xdispddcswtchr input set --monitor <stable-id> --input <logical-input> [--json]
+xdispddcswtchr inspect --all --json
+xdispddcswtchr diagnose --monitor <stable-id> --output <path>
+xdispddcswtchr version
+```
+
+`list`, `input get`, and `inspect` are safe read paths. `input set` cannot bypass
+the support matrix and accepts logical input names only; the production binary
+has no raw VCP command.
+
+## Configuration
+
+Configuration is optional and schema-versioned:
+
+```json
+{
+  "schema_version": 1,
+  "preferred_monitor_id": "mon-example",
+  "input_aliases": {
+    "work": "usb-c-1",
+    "desktop": "displayport-1"
+  },
+  "diagnostic_redaction": true
+}
+```
+
+The default path is `~/Library/Application Support/xdispddcswtchr/config.json`
+on macOS, the platform user-configuration directory elsewhere, or the path in
+`XDISPDDCSWTCHR_CONFIG`. The old `backend`, `cli`, `hotkeys`, `models`,
+`monitors`, and `pip` fields are rejected rather than silently accepted.
+
+## Validation
+
+Repository-owned entrypoints write all transient output beneath
+`test-artifacts/`:
+
+```sh
+./build-support/script/validate.sh quick
+./build-support/script/validate.sh full
+./build-support/script/validate.sh platform
+```
+
+PowerShell exposes the same modes:
 
 ```powershell
-# Windows
-go build -o xdispddcswtchr.exe .\cmd\xdispddcswtchr\
-.\xdispddcswtchr.exe
+./build-support/script/validate.ps1 -Mode quick
+./build-support/script/validate.ps1 -Mode full
+./build-support/script/validate.ps1 -Mode platform
 ```
 
-By default the **CLI backend** is used. To prefer the native backend on Windows, set `"backend": "native"` in the JSON.
+Hardware writes require a separately tagged qualification binary, an exact
+monitor identity, explicit switch-away acknowledgement, an operator-supplied
+recovery method, and a declared source/target pair. It never scans candidate
+raw values. See [hardware qualification](docs/HARDWARE-QUALIFICATION.md).
 
-## Build tags
-- No tags: CLI backend (all OSes)
-- `-tags native`: Enable native backend selection logic. Currently Windows native is implemented; macOS/Linux are stubs.
+## Platform implementation notes
 
-## Platform-Specific Notes
+The Apple Silicon backend uses public CoreGraphics display enumeration and
+IOKit registry ownership, plus dynamically resolved display-service symbols for
+the minimum DDC transaction surface. Private symbols are treated as a versioned
+compatibility boundary: absence returns a typed error and never falls back to an
+external executable. See [macOS compatibility](docs/MACOS-COMPATIBILITY.md) and
+the [migration inventory](docs/MIGRATION-INVENTORY.md).
+The production module and licence review is recorded in
+[dependencies](docs/DEPENDENCIES.md).
 
-### Linux (ddcutil CLI backend)
-- Requires `ddcutil` installed: `sudo apt-get install ddcutil`
-- May require `i2c-dev` kernel module: `sudo modprobe i2c-dev`
-- Verify DDC/CI support: `ddcutil detect`
-- **Limitation**: `ddcutil` currently ignores monitor ID and affects all monitors
-- **Performance**: Commands may take 1-2 seconds per execution
-- **Timeout**: 30-second timeout prevents hanging on unsupported monitors
+Primary references:
 
-### macOS (ddcctl CLI backend)
-- Requires `ddcctl` installed: `brew install ddcctl`
-- **Workaround**: Some ddcctl builds require a plist symlink:
-  ```bash
-  sudo ln -sfn /Library/Preferences/com.apple.windowserver.displays.plist \
-               /Library/Preferences/com.apple.windowserver.plist
-  ```
-- **Monitor ID Format**: Use `MonitorName@N` where N is the display number (e.g., `LG45GX950A@4`)
-- **VCP Code 0x60**: Input switching uses `-i` flag for better compatibility
-- **Timeout**: 30-second timeout prevents hanging on unsupported monitors
+- [Apple CoreGraphics display APIs](https://developer.apple.com/documentation/coregraphics/display-functions)
+- [Apple IOKit documentation](https://developer.apple.com/documentation/iokit)
+- [Go release history](https://go.dev/doc/devel/release)
+- [Bubble Tea releases](https://github.com/charmbracelet/bubbletea/releases)
+- [Dell S3423DWC documentation](https://www.dell.com/support/product-details/en-au/product/dell-s3423dwc-monitor/docs)
+- [Dell U4025QW documentation](https://www.dell.com/support/product-details/en-au/product/dell-u4025qw-monitor/docs)
 
-### Windows (ControlMyMonitor CLI backend)
-- Requires [ControlMyMonitor.exe](https://www.nirsoft.net/utils/control_my_monitor.html) in PATH
-- **Monitor ID Format**: Use monitor name from ControlMyMonitor (e.g., `"\\.\DISPLAY1"`)
-- **VCP Code Format**: Supports both hex (`0x60`) and decimal (`96`)
-- **Timeout**: 30-second timeout prevents hanging on unsupported monitors
-
-### Windows (Native backend)
-- Enable with `"backend": "native"` in settings JSON
-- Uses Windows DDC/CI API directly (no external tools required)
-- **Limitation**: If multiple physical monitors share one logical display, only the first is controlled
-- **VCP Code Format**: Supports both hex (`0x60`) and decimal (`96`)
-- **Monitor ID Format**: Use `DISPLAY1`, `DISPLAY2`, etc., or leave empty for first monitor
-
-## Troubleshooting
-
-### Commands timeout or hang
-- Verify your monitor supports DDC/CI (check monitor OSD settings)
-- Test manually with platform tools (`ddcutil`, `ddcctl`, or `ControlMyMonitor.exe`)
-- Some monitors require DDC/CI to be explicitly enabled in settings
-
-### Monitor not responding to commands
-- Check that the correct monitor ID is configured
-- Verify VCP codes match your monitor's capabilities
-- Some monitors only respond when powered on (not in standby)
-
-### macOS plist errors
-- Run the symlink command shown above
-- Ensure you have appropriate permissions
-
-## Notes
-- Linux may require `i2c-dev` access for future native backend; for CLI make sure `ddcutil` works manually.
-- macOS requires appropriate entitlement/permissions for low-level IOKit access; CLI uses `ddcctl`.
-```
+The implementation contract and complete acceptance criteria are in
+[PLAN.MD](PLAN.MD).

@@ -1,78 +1,88 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
-	"log"
-	"runtime"
+	"os"
 
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/markz0r/XDispDDCSwtchr/internal/application"
+	"github.com/markz0r/XDispDDCSwtchr/internal/cli"
 	"github.com/markz0r/XDispDDCSwtchr/internal/config"
-	"github.com/markz0r/XDispDDCSwtchr/internal/ddc"
-	"github.com/markz0r/XDispDDCSwtchr/internal/hotkeys"
-	"github.com/markz0r/XDispDDCSwtchr/internal/logic"
+	"github.com/markz0r/XDispDDCSwtchr/internal/tui"
+)
+
+var (
+	version = "dev"
+	commit  = "unknown"
 )
 
 func main() {
-	cfg, err := config.Load("XDispDDCSwtchr-Settings.json")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	backend, err := selectBackend(cfg)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	engine := logic.NewEngine(cfg, backend)
-	binds := map[string]hotkeys.Handler{}
-	for _, hk := range cfg.Hotkeys {
-		h := hk
-		binds[h.Keys] = func() {
-			if err := engine.Dispatch(h.Action, h.Args, h.Target); err != nil {
-				log.Printf("%s failed: %v", h.Action, err)
-			} else {
-				log.Printf("%s OK", h.Action)
-			}
-		}
-	}
-
-	stop := hotkeys.Register(binds)
-	defer stop()
-	log.Printf("XDispDDCSwtchr started on %s (backend=%s)", runtime.GOOS, cfg.Backend)
-	select {}
+	os.Exit(run(context.Background(), os.Args[1:]))
 }
 
-func selectBackend(cfg *config.Settings) (ddc.Backend, error) {
-	backend := cfg.Backend
-	if backend == "" {
-		backend = config.BackendCLI
+func run(ctx context.Context, args []string) int {
+	configPath, hasCommand, parseErr := invocation(args)
+	if parseErr != nil {
+		fmt.Fprintln(os.Stderr, parseErr)
+		return 2
 	}
-	cfg.Backend = backend
-
-	switch backend {
-	case config.BackendCLI:
-		return makeCLI(cfg), nil
-	case config.BackendNative:
-		b, err := ddc.MakeNative(cfg)
+	if !hasCommand {
+		if !terminal(os.Stdin) || !terminal(os.Stdout) {
+			return newCLIRunner().Run(ctx, nil)
+		}
+		path, err := config.ResolvePath(configPath)
 		if err != nil {
-			return nil, fmt.Errorf("native backend unavailable: %w", err)
+			fmt.Fprintln(os.Stderr, err)
+			return 2
 		}
-		return b, nil
-	default:
-		return nil, fmt.Errorf("unsupported backend: %s", backend)
+		settings, err := config.Load(path)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return cli.ExitCode(err)
+		}
+		runtime, err := application.New(commit)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return cli.ExitCode(err)
+		}
+		program := tea.NewProgram(tui.New(runtime.Service, settings.PreferredMonitorID))
+		if _, err := program.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 5
+		}
+		return 0
 	}
+	return newCLIRunner().Run(ctx, args)
 }
 
-func makeCLI(cfg *config.Settings) ddc.Backend {
-	switch runtime.GOOS {
-	case "windows":
-		return &ddc.CLIBackend{WinControlMyMonPath: cfg.CLI.WinControlMyMonPath}
-	case "darwin", "linux":
-		return &ddc.CLIBackend{
-			LinuxDdcutilPath: cfg.CLI.LinuxDdcutilPath,
-			MacDdcctlPath:    cfg.CLI.MacDdcctlPath,
-		}
-	default:
-		log.Fatalf("unsupported OS %s for CLI backend", runtime.GOOS)
-		return nil
+func newCLIRunner() *cli.Runner {
+	return cli.New(cli.Dependencies{
+		Version: version,
+		Commit:  commit,
+		NewRuntime: func() (cli.Runtime, error) {
+			runtime, err := application.New(commit)
+			if err != nil {
+				return cli.Runtime{}, err
+			}
+			return cli.Runtime{Service: runtime.Service, Platform: runtime.Platform}, nil
+		},
+	}, os.Stdout, os.Stderr)
+}
+
+func invocation(args []string) (configPath string, hasCommand bool, err error) {
+	flags := flag.NewFlagSet("xdispddcswtchr", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	flags.StringVar(&configPath, "config", "", "configuration file")
+	if err := flags.Parse(args); err != nil {
+		return "", false, err
 	}
+	return configPath, flags.NArg() > 0, nil
+}
+
+func terminal(file *os.File) bool {
+	info, err := file.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }

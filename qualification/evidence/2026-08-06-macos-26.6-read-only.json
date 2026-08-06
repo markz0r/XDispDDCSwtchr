@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-06T14:04:45Z",
+  "evidence_class": "read-only-feasibility",
+  "support_claim": false,
+  "application": {
+    "base_commit": "50841baa69aaa37a5db81556e6f2bef3826bd88c",
+    "working_tree_implementation": true,
+    "go_toolchain": "go1.26.5"
+  },
+  "host": {
+    "os": "darwin",
+    "version": "26.6",
+    "build": "25G72",
+    "architecture": "arm64",
+    "xcode": "26.6",
+    "xcode_build": "17F113"
+  },
+  "backend": {
+    "name": "macos-native",
+    "transport": "IOKit DCP IOAVService",
+    "core_display_image": "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay",
+    "external_monitor_utility": null
+  },
+  "operations": {
+    "enumeration": true,
+    "identity_correlation": true,
+    "vcp_0x60_read": true,
+    "vcp_write": false
+  },
+  "monitors": [
+    {
+      "id": "mon-3sunx4iwjjidob745f2axp63vi",
+      "manufacturer": "DEL",
+      "model": "DELL U4025QW",
+      "product_code": 17160,
+      "connector": "external-dcpext0",
+      "edid_sha256": "2b6779e807f7ca3a1a74e4486af3f74b7160cede3b986475ec72bc9449095e67",
+      "wire_reply_hex": "6e880200600019191919d4",
+      "normalised_current_raw": 25,
+      "result": "pass"
+    },
+    {
+      "id": "mon-uao4x7nvmuctsdly3rfufd2x2m",
+      "manufacturer": "DEL",
+      "model": "DELL S3423DWC",
+      "product_code": 53589,
+      "connector": "external-dcp",
+      "edid_sha256": "2275b7308488ff16587a22e7ffe5fa8a6f96c3a0f37720f045d4a6fb51521e77",
+      "wire_reply_hex": "6e88020060001b1b1111d4",
+      "normalised_current_raw": 17,
+      "result": "pass"
+    }
+  ],
+  "redaction": {
+    "serials_omitted": true,
+    "raw_edid_omitted": true
+  },
+  "result": "pass"
+}
