@@ -8,21 +8,25 @@ import (
 	"github.com/markz0r/XDispDDCSwtchr/internal/monitor"
 )
 
-func TestDellProfilesMatchExactEDIDIdentity(t *testing.T) {
+func TestBuiltinProfilesMatchObservedEDIDIdentityVariants(t *testing.T) {
 	r, err := NewRegistry()
 	if err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
-		product uint16
-		model   string
-		name    string
+		manufacturer string
+		product      uint16
+		model        string
+		name         string
 	}{
-		{0xd155, "DELL S3423DWC", "Dell S3423DWC"},
-		{0x4308, "DELL U4025QW", "Dell U4025QW"},
+		{"DEL", 0xd155, "DELL S3423DWC", "Dell S3423DWC"},
+		{"DEL", 0xd15b, "DELL S3423DWC", "Dell S3423DWC"},
+		{"DEL", 0x4308, "DELL U4025QW", "Dell U4025QW"},
+		{"DEL", 0x4318, "DELL U4025QW", "Dell U4025QW"},
+		{"GSM", 0x9e9e, "LG ULTRAGEAR+", "LG UltraGear OLED 45GX950A-B"},
 	}
 	for _, tt := range tests {
-		p, ok := r.Match("DEL", tt.product, tt.model)
+		p, ok := r.Match(tt.manufacturer, tt.product, tt.model)
 		if !ok || p.Name != tt.name {
 			t.Fatalf("product=%04x model=%q got=%+v ok=%v", tt.product, tt.model, p, ok)
 		}
@@ -30,10 +34,26 @@ func TestDellProfilesMatchExactEDIDIdentity(t *testing.T) {
 	if _, ok := r.Match("DEL", 0x4308, "some other display"); ok {
 		t.Fatal("model-name secondary check was bypassed")
 	}
-	for _, name := range []string{"Dell S3423DWC", "Dell U4025QW"} {
-		profile, _ := r.ByName(name)
-		if len(profile.Inputs) != 0 {
-			t.Fatalf("%s contains a mapping without tracked hardware evidence: %+v", name, profile.Inputs)
+	wantInputs := map[string]map[monitor.Input]uint16{
+		"Dell S3423DWC": {monitor.InputUSBC1: 0x1b, monitor.InputHDMI1: 0x11, monitor.InputHDMI2: 0x12},
+		"Dell U4025QW":  {monitor.InputThunderbolt1: 0x19, monitor.InputDisplayPort1: 0x0f, monitor.InputHDMI1: 0x11},
+		"LG UltraGear OLED 45GX950A-B": {
+			monitor.InputDisplayPort1: 0x0f, monitor.InputDisplayPort2: 0x10,
+			monitor.InputHDMI1: 0x11, monitor.InputHDMI2: 0x12,
+		},
+	}
+	for name, want := range wantInputs {
+		profile, ok := r.ByName(name)
+		if !ok {
+			t.Fatalf("profile %q missing", name)
+		}
+		if len(profile.Inputs) != len(want) {
+			t.Fatalf("%s mappings=%+v want=%+v", name, profile.Inputs, want)
+		}
+		for logical, raw := range want {
+			if profile.Inputs[logical] != raw {
+				t.Fatalf("%s %s=0x%02x want=0x%02x", name, logical, profile.Inputs[logical], raw)
+			}
 		}
 	}
 }
@@ -121,6 +141,9 @@ func TestRegistryRejectsAmbiguousOrInvalidProfiles(t *testing.T) {
 		{"duplicate-matcher", []Profile{valid("one", 1), valid("two", 1)}},
 		{"empty-logical", []Profile{{Name: "bad", Match: EDIDMatcher{Manufacturer: "TST", ProductCode: 1}, Inputs: map[monitor.Input]uint16{"": 1}}}},
 		{"duplicate-raw", []Profile{{Name: "bad", Match: EDIDMatcher{Manufacturer: "TST", ProductCode: 1}, Inputs: map[monitor.Input]uint16{monitor.InputHDMI1: 1, monitor.InputHDMI2: 1}}}},
+		{"zero-product-alias", []Profile{{Name: "bad", Match: EDIDMatcher{Manufacturer: "TST", ProductCode: 1, ProductCodes: []uint16{0}}, Inputs: map[monitor.Input]uint16{}}}},
+		{"duplicate-product-alias", []Profile{{Name: "bad", Match: EDIDMatcher{Manufacturer: "TST", ProductCode: 1, ProductCodes: []uint16{1}}, Inputs: map[monitor.Input]uint16{}}}},
+		{"cross-profile-product-alias", []Profile{valid("one", 1), {Name: "two", Match: EDIDMatcher{Manufacturer: "TST", ProductCode: 2, ProductCodes: []uint16{1}}, Inputs: map[monitor.Input]uint16{}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

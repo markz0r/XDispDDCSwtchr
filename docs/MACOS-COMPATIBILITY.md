@@ -19,6 +19,15 @@ use. No static dependency is taken on a private framework path, and failure to
 resolve or correlate produces a typed unavailable/endpoint error. There is no
 subprocess fallback.
 
+Get VCP parsing remains strict and checksum-validated. The backend first parses
+the standard 11-byte DDC/CI response. Some Apple Silicon CoreDisplay
+transactions return only the eight-byte suffix beginning at the result field
+into an 11-byte zero-initialized buffer. The backend accepts that form only
+when bytes 8 through 10 remain zero and byte 1 is the requested VCP code,
+prepends the standard `6e 88 02` header, and runs the same parser again. It does
+not perform offset scanning or relax the generic DDC parser. Rejected replies
+retain the exact transport bytes for typed verification diagnostics.
+
 The current CoreDisplay image is discovered at runtime. On the validated host it
 is `/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay`; older private
 framework path assumptions are not embedded in the program.
@@ -27,6 +36,12 @@ Read evidence is stored in
 `qualification/evidence/2026-08-06-macos-26.6-read-only.json`. This proves
 feasibility only. It is not a write qualification record and does not enable a
 normal production write.
+
+An operator-observed U4025QW switch to Thunderbolt succeeded while the previous
+build rejected the post-write reply as `invalid payload length 96`. This is
+implementation evidence for the compact reply boundary above, but it is not a
+release qualification claim until the guarded workflow captures valid
+read-back or separately completes the required physical recovery evidence.
 
 References:
 

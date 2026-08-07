@@ -15,14 +15,17 @@ import (
 	"github.com/markz0r/XDispDDCSwtchr/internal/diagnostics"
 	"github.com/markz0r/XDispDDCSwtchr/internal/monitor"
 	"github.com/markz0r/XDispDDCSwtchr/internal/platform"
+	"github.com/markz0r/XDispDDCSwtchr/internal/qualification"
 )
 
-const JSONSchemaVersion = 1
+const JSONSchemaVersion = 2
 
 type Service interface {
+	ConfigureUserQualifications([]qualification.Record, func(qualification.Record) error) error
 	Discover(context.Context) (monitor.Snapshot, error)
 	Inputs(monitor.MonitorRef) ([]monitor.InputValue, error)
 	GetInput(context.Context, monitor.MonitorRef) (monitor.InputValue, error)
+	DetectInputs(context.Context, monitor.MonitorRef) (monitor.CapabilityReport, error)
 	Switch(context.Context, monitor.MonitorRef, monitor.Input) (monitor.SwitchResult, error)
 }
 
@@ -82,6 +85,9 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 	}
 	runtime, err := r.deps.NewRuntime()
 	if err != nil {
+		return r.fail(err)
+	}
+	if err := runtime.Service.ConfigureUserQualifications(settings.UserQualifications, nil); err != nil {
 		return r.fail(err)
 	}
 
@@ -157,18 +163,59 @@ func (r *Runner) list(ctx context.Context, service Service, args []string) int {
 
 func (r *Runner) input(ctx context.Context, service Service, settings config.Settings, args []string) int {
 	if len(args) == 0 {
-		return r.fail(errors.New("input requires list, get, set, or probe"))
+		return r.fail(errors.New("input requires list, get, detect, probe, capabilities, or set"))
 	}
 	switch args[0] {
 	case "list":
 		return r.inputList(ctx, service, args[1:])
-	case "get", "probe":
+	case "get":
 		return r.inputGet(ctx, service, args[1:])
+	case "detect", "probe", "capabilities":
+		return r.inputDetect(ctx, service, args[1:])
 	case "set":
 		return r.inputSet(ctx, service, settings, args[1:])
 	default:
 		return r.fail(fmt.Errorf("unknown input command %q", args[0]))
 	}
+}
+
+func (r *Runner) inputDetect(ctx context.Context, service Service, args []string) int {
+	flags := flag.NewFlagSet("input detect", flag.ContinueOnError)
+	flags.SetOutput(r.stderr)
+	monitorID := flags.String("monitor", "", "stable monitor ID")
+	asJSON := flags.Bool("json", false, "emit JSON")
+	if err := flags.Parse(args); err != nil || *monitorID == "" || flags.NArg() != 0 {
+		return 2
+	}
+	_, descriptor, ref, err := discoverMonitor(ctx, service, *monitorID)
+	if err != nil {
+		return r.fail(err)
+	}
+	report, err := service.DetectInputs(ctx, ref)
+	if err != nil {
+		return r.fail(err)
+	}
+	if *asJSON {
+		return r.writeJSON(struct {
+			SchemaVersion int                      `json:"schema_version"`
+			Monitor       monitor.Descriptor       `json:"monitor"`
+			Capabilities  monitor.CapabilityReport `json:"capabilities"`
+		}{JSONSchemaVersion, descriptor, report})
+	}
+	fmt.Fprintf(r.stdout, "VCP 0x60 advertised: %t\n", report.InputSourceAdvertised)
+	fmt.Fprintln(r.stdout, "RAW\tLOGICAL\tMAPPING\tWRITE-QUALIFIED")
+	for _, candidate := range report.Inputs {
+		logical := string(candidate.Logical)
+		if logical == "" {
+			logical = "unknown"
+		}
+		fmt.Fprintf(r.stdout, "0x%02x\t%s\t%s\t%t\n", candidate.Raw, logical, candidate.MappingSource, candidate.WriteQualified)
+	}
+	if len(report.Inputs) == 0 {
+		fmt.Fprintln(r.stdout, "(no input values advertised)")
+	}
+	fmt.Fprintln(r.stdout, "Advisory only: monitor capability data does not authorise writes.")
+	return 0
 }
 
 func (r *Runner) inputList(ctx context.Context, service Service, args []string) int {
@@ -264,6 +311,11 @@ func (r *Runner) inputSet(ctx context.Context, service Service, settings config.
 			Result        monitor.SwitchResult `json:"result"`
 		}{JSONSchemaVersion, result})
 	}
+	if result.Verification == monitor.VerificationAssumedSuccess {
+		fmt.Fprintln(r.stdout, "Assumed success [no read-back provided by display]")
+		fmt.Fprintln(r.stdout, "Run input get or list after the display path is available to verify the current input.")
+		return 0
+	}
 	fmt.Fprintf(r.stdout, "%s: %s\n", result.Target.Logical, result.Verification)
 	return 0
 }
@@ -304,6 +356,7 @@ func (r *Runner) diagnose(ctx context.Context, runtime Runtime, settings config.
 	started := time.Now()
 	current, readErr := runtime.Service.GetInput(ctx, ref)
 	duration := time.Since(started)
+	capabilityReport, capabilityErr := runtime.Service.DetectInputs(ctx, ref)
 	if inputsErr != nil && !errors.Is(inputsErr, monitor.ErrUnqualifiedSlice) && readErr == nil {
 		readErr = inputsErr
 	}
@@ -321,6 +374,7 @@ func (r *Runner) diagnose(ctx context.Context, runtime Runtime, settings config.
 	bundle := diagnostics.Build(diagnostics.BuildOptions{
 		Now: r.deps.Now(), Version: r.deps.Version, Commit: r.deps.Commit, Platform: runtime.Platform,
 		Descriptor: descriptor, Inputs: inputs, Current: currentPointer, ReadDuration: duration, ReadError: readErr, Redact: redact,
+		Capabilities: &capabilityReport, CapabilityError: capabilityErr,
 	})
 	encoded, err := diagnostics.Marshal(bundle)
 	if err != nil {
@@ -379,7 +433,8 @@ func ExitCode(err error) int {
 		return 4
 	case errors.Is(err, monitor.ErrTransactionTimeout), errors.Is(err, monitor.ErrMalformedReply),
 		errors.Is(err, monitor.ErrChecksum), errors.Is(err, monitor.ErrDisconnected),
-		errors.Is(err, monitor.ErrReadUnsupported), errors.Is(err, monitor.ErrWriteUnsupported):
+		errors.Is(err, monitor.ErrReadUnsupported), errors.Is(err, monitor.ErrCapabilitiesUnsupported),
+		errors.Is(err, monitor.ErrWriteUnsupported):
 		return 5
 	default:
 		return 2
@@ -393,6 +448,7 @@ func (r *Runner) usage() {
 		"  list [--json]",
 		"  input list --monitor <id> [--json]",
 		"  input get --monitor <id> [--json]",
+		"  input detect --monitor <id> [--json]",
 		"  input set --monitor <id> --input <logical> [--json]",
 		"  inspect --all --json",
 		"  diagnose --monitor <id> --output <path>",

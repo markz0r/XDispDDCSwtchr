@@ -176,11 +176,34 @@ func (s *session) GetInputRaw(ctx context.Context) (uint16, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	parsed, err := ddc.ParseGetVCPReply(reply, ddc.VCPInputSource)
+	parsed, err := parseCoreDisplayGetVCPReply(reply, ddc.VCPInputSource)
 	if err != nil {
 		return 0, err
 	}
 	return ddc.NormalizeInputSourceValue(parsed.Current), nil
+}
+
+// parseCoreDisplayGetVCPReply accepts the standard MCCS frame first. Some
+// Apple Silicon CoreDisplay transports return only the eight bytes beginning
+// at the DDC result field, leaving the fixed 11-byte read buffer's final three
+// bytes zeroed. Reconstruct only that exact representation, then delegate all
+// length, command, result, code, and checksum validation to the strict parser.
+func parseCoreDisplayGetVCPReply(reply []byte, expectedCode byte) (ddc.VCPReply, error) {
+	parsed, standardErr := ddc.ParseGetVCPReply(reply, expectedCode)
+	if standardErr == nil {
+		return parsed, nil
+	}
+	if len(reply) != 11 || reply[1] != expectedCode || reply[8] != 0 || reply[9] != 0 || reply[10] != 0 {
+		return ddc.VCPReply{}, standardErr
+	}
+	canonical := make([]byte, 0, 11)
+	canonical = append(canonical, ddc.DisplayAddress, 0x88, 0x02)
+	canonical = append(canonical, reply[:8]...)
+	parsed, compactErr := ddc.ParseGetVCPReply(canonical, expectedCode)
+	if compactErr != nil {
+		return ddc.VCPReply{}, ddc.WithReplyBytes(compactErr, reply)
+	}
+	return parsed, nil
 }
 
 func (s *session) SetInputRaw(ctx context.Context, value uint16) error {
@@ -193,6 +216,44 @@ func (s *session) SetInputRaw(ctx context.Context, value uint16) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+func (s *session) Capabilities(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.check(ctx); err != nil {
+		return "", err
+	}
+
+	assembled := make([]byte, 0, 2048)
+	for {
+		if len(assembled) > ddc.MaxCapabilitiesLength {
+			return "", fmt.Errorf("%w: capability string exceeds %d bytes", monitor.ErrMalformedReply, ddc.MaxCapabilitiesLength)
+		}
+		offset := uint16(len(assembled))
+		reply := make([]byte, ddc.MaxCapabilitiesReplySize)
+		if err := transaction(s.handle, ddc.EncodeCapabilitiesRequest(offset), reply, s.replyDelay); err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		fragment, err := ddc.ParseCapabilitiesReply(reply, offset)
+		if err != nil {
+			return "", err
+		}
+		if len(fragment.Data) == 0 {
+			break
+		}
+		if len(assembled)+len(fragment.Data) > ddc.MaxCapabilitiesLength || len(assembled)+len(fragment.Data) > int(^uint16(0)) {
+			return "", fmt.Errorf("%w: capability string exceeds safe protocol limit", monitor.ErrMalformedReply)
+		}
+		assembled = append(assembled, fragment.Data...)
+		if err := waitContext(ctx, s.replyDelay); err != nil {
+			return "", err
+		}
+	}
+	return strings.TrimRight(string(assembled), " \t\r\n\x00"), nil
 }
 
 func (s *session) Close() error {
@@ -238,6 +299,20 @@ func transaction(handle C.xdisp_ddc_handle, request, reply []byte, delay time.Du
 		return nativeError(int(status), C.GoString(&message[0]))
 	}
 	return nil
+}
+
+func waitContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func connectorName(path string) string {
@@ -286,3 +361,4 @@ func discoveryProbe() (string, error) {
 
 var _ monitor.Backend = (*Backend)(nil)
 var _ monitor.RawInputSession = (*session)(nil)
+var _ monitor.CapabilitySession = (*session)(nil)

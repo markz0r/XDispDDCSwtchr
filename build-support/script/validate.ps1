@@ -52,7 +52,7 @@ function Invoke-Full {
     $Coverage = Join-Path $ArtifactDir 'coverage.out'
     Invoke-Checked { go test -covermode=atomic "-coverprofile=$Coverage" ./... }
     go tool cover "-func=$Coverage" | Set-Content (Join-Path $ArtifactDir 'coverage.txt')
-    foreach ($Package in @('ddc', 'edid', 'profiles', 'service')) {
+    foreach ($Package in @('capabilities', 'ddc', 'edid', 'profiles', 'service')) {
         $PackageCoverage = Join-Path $ArtifactDir "coverage-$Package.out"
         Invoke-Checked { go test -covermode=atomic "-coverprofile=$PackageCoverage" "./internal/$Package" }
         $CoverageLines = @(go tool cover "-func=$PackageCoverage")
@@ -60,7 +60,7 @@ function Invoke-Full {
         if ($CoverageLines[-1] -notmatch '([0-9]+(?:\.[0-9]+)?)%') { throw "could not parse $Package coverage" }
         if ([double]$Matches[1] -lt 90) { throw "$Package coverage $($Matches[1])% is below 90%" }
     }
-    $CommonPackages = @('./internal/cli', './internal/config', './internal/ddc', './internal/diagnostics', './internal/edid', './internal/monitor', './internal/platform', './internal/profiles', './internal/service', './internal/tui')
+    $CommonPackages = @('./internal/capabilities', './internal/cli', './internal/config', './internal/ddc', './internal/diagnostics', './internal/edid', './internal/monitor', './internal/platform', './internal/profiles', './internal/service', './internal/tui', './internal/verification')
     $CommonPattern = $CommonPackages -join ','
     $CommonCoverage = Join-Path $ArtifactDir 'coverage-common.out'
     Invoke-Checked { go test -covermode=atomic "-coverpkg=$CommonPattern" "-coverprofile=$CommonCoverage" $CommonPackages }
@@ -138,11 +138,16 @@ try {
             $DiagnosticPath = Join-Path $ArtifactDir 'read-diagnostic.json'
             & $Binary diagnose --monitor $MonitorId --output $DiagnosticPath | Set-Content (Join-Path $ArtifactDir 'diagnose.stdout')
             if ($LASTEXITCODE -ne 0) { throw 'read diagnostic command failed' }
+            $CapabilityPath = Join-Path $ArtifactDir 'input-capabilities.json'
+            & $Binary input detect --monitor $MonitorId --json | Set-Content $CapabilityPath
+            if ($LASTEXITCODE -ne 0) { throw 'input capability detection failed' }
             $Diagnostic = Get-Content $DiagnosticPath -Raw | ConvertFrom-Json
             if ($Diagnostic.monitor.id -ne $MonitorId -or $Diagnostic.monitor.model_name -ne $ExpectedModel -or $Diagnostic.edid.sha256 -ne $ExpectedEdidSha256) {
                 throw 'exact monitor identity not found'
             }
             if (-not $Diagnostic.redaction.enabled) { throw 'hardware-read diagnostic is not redacted' }
+            $Capabilities = Get-Content $CapabilityPath -Raw | ConvertFrom-Json
+            if (-not $Capabilities.capabilities.input_source_advertised) { throw 'VCP 0x60 is not advertised by the monitor capability string' }
         }
         'hardware-write' {
             Require-HardwareIdentity

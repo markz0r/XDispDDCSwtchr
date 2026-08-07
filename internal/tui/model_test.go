@@ -12,13 +12,18 @@ import (
 )
 
 type stubService struct {
-	snapshot    monitor.Snapshot
-	input       monitor.InputValue
-	inputsErr   error
-	discoverErr error
-	readErr     error
-	switchErr   error
-	switches    int
+	snapshot      monitor.Snapshot
+	input         monitor.InputValue
+	inputsErr     error
+	discoverErr   error
+	readErr       error
+	capability    monitor.CapabilityReport
+	capabilityErr error
+	approveErr    error
+	switchErr     error
+	switches      int
+	approvals     int
+	approved      []monitor.InputValue
 }
 
 func (s *stubService) Discover(context.Context) (monitor.Snapshot, error) {
@@ -29,6 +34,21 @@ func (s *stubService) Inputs(monitor.MonitorRef) ([]monitor.InputValue, error) {
 }
 func (s *stubService) GetInput(context.Context, monitor.MonitorRef) (monitor.InputValue, error) {
 	return s.input, s.readErr
+}
+func (s *stubService) DetectInputs(context.Context, monitor.MonitorRef) (monitor.CapabilityReport, error) {
+	return s.capability, s.capabilityErr
+}
+func (s *stubService) ApproveInputs(_ context.Context, ref monitor.MonitorRef, mappings []monitor.InputValue) error {
+	s.approvals++
+	s.approved = append([]monitor.InputValue(nil), mappings...)
+	if s.approveErr == nil {
+		for index := range s.snapshot.Monitors {
+			if s.snapshot.Monitors[index].ID == ref.ID {
+				s.snapshot.Monitors[index].SupportState = monitor.SupportUserQualified
+			}
+		}
+	}
+	return s.approveErr
 }
 func (s *stubService) Switch(_ context.Context, ref monitor.MonitorRef, input monitor.Input) (monitor.SwitchResult, error) {
 	s.switches++
@@ -86,6 +106,31 @@ func TestReadWriteWindowAndUnknownMessageStates(t *testing.T) {
 	}
 }
 
+func TestAssumedSuccessIsAdvisoryNotFailureOrCurrentInput(t *testing.T) {
+	ref := monitor.MonitorRef{ID: "mon", Generation: 1}
+	model := New(&stubService{}, "")
+	model.snapshot = monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{ID: "mon", SupportState: monitor.SupportSupported}}}
+	previous := monitor.InputValue{Logical: monitor.InputHDMI1, Raw: 0x11}
+	model.current = &previous
+	model.busy = true
+	result := monitor.SwitchResult{
+		Monitor: ref, Target: monitor.InputValue{Logical: monitor.InputThunderbolt1, Raw: 0x19},
+		Verification:      monitor.VerificationAssumedSuccess,
+		VerificationIssue: &monitor.VerificationIssue{Category: monitor.VerificationIssueMalformedReply},
+	}
+	updated, _ := model.Update(inputWriteCompletedMsg{OperationID: 1, Monitor: ref, Result: result})
+	model = updated.(Model)
+	if model.busy || model.lastError != nil || model.current != nil {
+		t.Fatalf("unexpected assumed-success state: %+v", model)
+	}
+	if !strings.Contains(model.status, "Assumed success [no read-back provided by display]") || !strings.Contains(model.status, "Press r") {
+		t.Fatalf("status=%q", model.status)
+	}
+	if strings.Contains(model.View().Content, "Error:") {
+		t.Fatalf("assumed success rendered an error banner: %q", model.View().Content)
+	}
+}
+
 func TestViewAndNavigationKeyStates(t *testing.T) {
 	service := &stubService{
 		snapshot: monitor.Snapshot{Generation: 2, Monitors: []monitor.Descriptor{
@@ -99,11 +144,12 @@ func TestViewAndNavigationKeyStates(t *testing.T) {
 	model.monitorCursor = model.preferredIndex()
 	model.inputs = []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}, {Logical: monitor.InputHDMI2, Raw: 0x12}}
 	model.current = &service.input
+	model.detected = []monitor.InputCandidate{{Raw: 0x11, Logical: monitor.InputHDMI1, MappingSource: monitor.InputMappingProfile}}
 	model.busy = false
 	model.lastError = monitor.ErrChecksum
 	model.showHelp = true
 	view := model.View()
-	for _, text := range []string{"XDispDDCSwtchr", "> Two", "hdmi-1 (current)", "Error:", "up/down"} {
+	for _, text := range []string{"XDispDDCSwtchr", "> Two", "hdmi-1 (current)", "Advertised inputs (advisory)", "0x11", "Error:", "up/down"} {
 		if !strings.Contains(view.Content, text) {
 			t.Fatalf("view missing %q: %s", text, view.Content)
 		}
@@ -148,10 +194,39 @@ func TestViewAndNavigationKeyStates(t *testing.T) {
 		t.Fatal("get did not start read")
 	}
 	model.busy = false
+	service.capability = monitor.CapabilityReport{Inputs: []monitor.InputCandidate{{Raw: 0x11, Logical: monitor.InputHDMI1}}}
+	updated, cmd = model.handleKey("c")
+	model = updated.(Model)
+	if !model.busy || cmd == nil || cmd().(capabilityReadCompletedMsg).Monitor.ID != "two" {
+		t.Fatal("capability detection did not start")
+	}
+	model.busy = false
 	updated, cmd = model.handleKey("r")
 	model = updated.(Model)
-	if !model.busy || cmd == nil || model.current != nil || model.inputs != nil {
+	if !model.busy || cmd == nil || model.current != nil || model.inputs != nil || model.detected != nil {
 		t.Fatal("refresh did not reset discovery state")
+	}
+}
+
+func TestCapabilityCompletionAndStaleSuppression(t *testing.T) {
+	ref := monitor.MonitorRef{ID: "mon", Generation: 1}
+	model := New(&stubService{}, "")
+	model.snapshot = monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{ID: "mon"}}}
+	model.busy = true
+	report := monitor.CapabilityReport{Inputs: []monitor.InputCandidate{{Raw: 0x1b, MappingSource: monitor.InputMappingUnmapped}}}
+	updated, _ := model.Update(capabilityReadCompletedMsg{OperationID: 1, Monitor: ref, Report: report})
+	model = updated.(Model)
+	if model.busy || len(model.detected) != 1 || model.lastError != nil || !strings.Contains(model.status, "advisory") {
+		t.Fatalf("unexpected capability state: %+v", model)
+	}
+	updated, _ = model.Update(capabilityReadCompletedMsg{OperationID: 99, Monitor: ref, Err: monitor.ErrChecksum})
+	if updated.(Model).lastError != nil {
+		t.Fatal("stale capability message changed state")
+	}
+	model.busy = true
+	updated, _ = model.Update(capabilityReadCompletedMsg{OperationID: 1, Monitor: ref, Err: monitor.ErrChecksum})
+	if !errors.Is(updated.(Model).lastError, monitor.ErrChecksum) || updated.(Model).status != "Capability detection failed" {
+		t.Fatalf("capability error state: %+v", updated)
 	}
 }
 
@@ -238,5 +313,137 @@ func TestExperimentalSliceCannotSwitch(t *testing.T) {
 	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if cmd != nil || updated.(Model).lastError != monitor.ErrUnqualifiedSlice {
 		t.Fatal("experimental switch was not blocked")
+	}
+}
+
+func TestUnqualifiedMonitorAutomaticallyCompletesGuidedQualification(t *testing.T) {
+	service := &stubService{
+		snapshot: monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{
+			ID: "mon-a", Model: "Unknown", Connector: "direct", SupportState: monitor.SupportBackendExperimental,
+		}}},
+		input: monitor.InputValue{Raw: 0x0f},
+		capability: monitor.CapabilityReport{Inputs: []monitor.InputCandidate{
+			{Raw: 0x0f, Logical: monitor.InputDisplayPort1, MappingSource: monitor.InputMappingMCCSStandard},
+			{Raw: 0x1b, MappingSource: monitor.InputMappingUnmapped},
+		}},
+	}
+	model := New(service, "")
+
+	discovery := model.Init()().(discoveryCompletedMsg)
+	updated, readCmd := model.Update(discovery)
+	model = updated.(Model)
+	if readCmd == nil {
+		t.Fatal("discovery did not start input read")
+	}
+	updated, capabilityCmd := model.Update(readCmd())
+	model = updated.(Model)
+	if capabilityCmd == nil || !model.busy || !strings.Contains(model.status, "not qualified") {
+		t.Fatalf("unqualified read did not start capabilities: %+v", model)
+	}
+	updated, _ = model.Update(capabilityCmd())
+	model = updated.(Model)
+	if !model.qualificationReview || model.qualificationChoice == 0 || model.qualificationIndex != 0 {
+		t.Fatalf("guided review did not start with detected suggestion: %+v", model)
+	}
+	for _, text := range []string{"Resolve unqualified monitor", "Candidate 1 of 2", "displayport-1", "does not write"} {
+		if !strings.Contains(model.View().Content, text) {
+			t.Fatalf("qualification view missing %q: %s", text, model.View().Content)
+		}
+	}
+
+	updated, _ = model.handleKey("enter")
+	model = updated.(Model)
+	if model.qualificationIndex != 1 || model.qualificationChoice != 0 || len(model.qualificationMappings) != 1 {
+		t.Fatalf("first mapping was not accepted and unknown was not default-skipped: %+v", model)
+	}
+	updated, _ = model.handleKey("right")
+	model = updated.(Model)
+	updated, _ = model.handleKey("enter")
+	model = updated.(Model)
+	if model.lastError == nil || model.qualificationIndex != 1 {
+		t.Fatalf("duplicate logical label was accepted: %+v", model)
+	}
+	updated, _ = model.handleKey("left")
+	model = updated.(Model)
+	updated, _ = model.handleKey("enter")
+	model = updated.(Model)
+	if model.qualificationReview || !model.qualificationConfirm || len(model.qualificationMappings) != 1 {
+		t.Fatalf("review did not reach explicit confirmation: %+v", model)
+	}
+	for _, text := range []string{"Confirm local user qualification", "user-qualified, not vendor/release-qualified", "enter saves"} {
+		if !strings.Contains(model.View().Content, text) {
+			t.Fatalf("confirmation view missing %q: %s", text, model.View().Content)
+		}
+	}
+
+	updated, approvalCmd := model.handleKey("enter")
+	model = updated.(Model)
+	if approvalCmd == nil || !model.busy {
+		t.Fatal("confirmation did not start persistence")
+	}
+	completion := approvalCmd().(qualificationCompletedMsg)
+	updated, rediscoverCmd := model.Update(completion)
+	model = updated.(Model)
+	if service.approvals != 1 || len(service.approved) != 1 || service.approved[0] != (monitor.InputValue{Logical: monitor.InputDisplayPort1, Raw: 0x0f}) || rediscoverCmd == nil {
+		t.Fatalf("approval was not exact: approvals=%d mappings=%+v model=%+v", service.approvals, service.approved, model)
+	}
+	updated, readCmd = model.Update(rediscoverCmd())
+	model = updated.(Model)
+	if model.snapshot.Monitors[0].SupportState != monitor.SupportUserQualified || readCmd == nil {
+		t.Fatalf("saved qualification was not rediscovered: %+v", model)
+	}
+	updated, followup := model.Update(readCmd())
+	model = updated.(Model)
+	if followup != nil || model.busy || model.qualificationReview {
+		t.Fatalf("user-qualified monitor re-entered qualification: %+v", model)
+	}
+
+	updated, firstEnter := model.handleKey("enter")
+	model = updated.(Model)
+	if firstEnter != nil || model.confirmInput != monitor.InputHDMI1 {
+		t.Fatalf("user-qualified switch was not armed: %+v", model)
+	}
+	updated, switchCmd := model.handleKey("enter")
+	if switchCmd == nil || !updated.(Model).busy {
+		t.Fatal("user-qualified switch did not start")
+	}
+}
+
+func TestQualificationCanBeCancelledAndRequiresAtLeastOneMapping(t *testing.T) {
+	model := New(&stubService{}, "")
+	model.snapshot = monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{ID: "mon", SupportState: monitor.SupportUnprofiled}}}
+	model.detected = []monitor.InputCandidate{{Raw: 0x1b, MappingSource: monitor.InputMappingUnmapped}}
+	model.busy = false
+	model = model.beginQualification()
+	updated, _ := model.handleKey("enter")
+	model = updated.(Model)
+	if model.qualificationConfirm || model.lastError == nil || !strings.Contains(model.status, "No mappings accepted") {
+		t.Fatalf("empty qualification was accepted: %+v", model)
+	}
+	updated, _ = model.handleKey("a")
+	model = updated.(Model)
+	if !model.qualificationReview {
+		t.Fatal("review could not be restarted")
+	}
+	updated, _ = model.handleKey("esc")
+	model = updated.(Model)
+	if model.qualificationReview || model.qualificationConfirm || !strings.Contains(model.status, "cancelled") {
+		t.Fatalf("qualification was not cancelled: %+v", model)
+	}
+}
+
+func TestAmbiguousAndInvalidIdentitiesAreNeverPromptedForQualification(t *testing.T) {
+	for _, identity := range []monitor.IdentityState{monitor.IdentityAmbiguous, monitor.IdentityInvalidEDID} {
+		descriptor := monitor.Descriptor{ID: "mon", IdentityState: identity, SupportState: monitor.SupportUnprofiled}
+		model := New(&stubService{}, "")
+		model.snapshot = monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{descriptor}}
+		model.busy = false
+		if model.needsQualification() {
+			t.Fatalf("identity %s was eligible for qualification", identity)
+		}
+		updated, cmd := model.handleKey("a")
+		if cmd != nil || updated.(Model).qualificationReview {
+			t.Fatalf("identity %s started qualification", identity)
+		}
 	}
 }

@@ -20,6 +20,7 @@ const (
 type EDIDMatcher struct {
 	Manufacturer string
 	ProductCode  uint16
+	ProductCodes []uint16
 	ModelNames   []string
 }
 
@@ -37,8 +38,8 @@ type Profile struct {
 var builtins = []Profile{
 	{
 		Name:          "Dell S3423DWC",
-		Match:         EDIDMatcher{Manufacturer: "DEL", ProductCode: 0xd155, ModelNames: []string{"DELL S3423DWC", "S3423DWC"}},
-		Inputs:        map[monitor.Input]uint16{},
+		Match:         EDIDMatcher{Manufacturer: "DEL", ProductCode: 0xd155, ProductCodes: []uint16{0xd15b}, ModelNames: []string{"DELL S3423DWC", "S3423DWC"}},
+		Inputs:        map[monitor.Input]uint16{monitor.InputUSBC1: 0x1b, monitor.InputHDMI1: 0x11, monitor.InputHDMI2: 0x12},
 		ReadSupported: true,
 		RetryCount:    3,
 		ReplyDelay:    50 * time.Millisecond,
@@ -47,8 +48,18 @@ var builtins = []Profile{
 	},
 	{
 		Name:          "Dell U4025QW",
-		Match:         EDIDMatcher{Manufacturer: "DEL", ProductCode: 0x4308, ModelNames: []string{"DELL U4025QW", "U4025QW"}},
-		Inputs:        map[monitor.Input]uint16{},
+		Match:         EDIDMatcher{Manufacturer: "DEL", ProductCode: 0x4308, ProductCodes: []uint16{0x4318}, ModelNames: []string{"DELL U4025QW", "U4025QW"}},
+		Inputs:        map[monitor.Input]uint16{monitor.InputThunderbolt1: 0x19, monitor.InputDisplayPort1: 0x0f, monitor.InputHDMI1: 0x11},
+		ReadSupported: true,
+		RetryCount:    3,
+		ReplyDelay:    50 * time.Millisecond,
+		WriteDelay:    150 * time.Millisecond,
+		Verification:  VerifyImmediate,
+	},
+	{
+		Name:          "LG UltraGear OLED 45GX950A-B",
+		Match:         EDIDMatcher{Manufacturer: "GSM", ProductCode: 0x9e9e, ModelNames: []string{"LG ULTRAGEAR+", "45GX950A", "45GX950A-B"}},
+		Inputs:        map[monitor.Input]uint16{monitor.InputHDMI1: 0x11, monitor.InputHDMI2: 0x12, monitor.InputDisplayPort1: 0x0f, monitor.InputDisplayPort2: 0x10},
 		ReadSupported: true,
 		RetryCount:    3,
 		ReplyDelay:    50 * time.Millisecond,
@@ -79,7 +90,7 @@ func (r *Registry) Match(manufacturer string, productCode uint16, model string) 
 	model = normalise(model)
 	for i := range r.profiles {
 		p := &r.profiles[i]
-		if normalise(p.Match.Manufacturer) != manufacturer || p.Match.ProductCode != productCode {
+		if normalise(p.Match.Manufacturer) != manufacturer || !matchesProductCode(p.Match, productCode) {
 			continue
 		}
 		if len(p.Match.ModelNames) == 0 {
@@ -141,11 +152,18 @@ func (r *Registry) validate() error {
 		if p.Name == "" || p.Match.Manufacturer == "" || p.Match.ProductCode == 0 {
 			return fmt.Errorf("invalid profile identity: %q", p.Name)
 		}
-		key := fmt.Sprintf("%s:%04x", normalise(p.Match.Manufacturer), p.Match.ProductCode)
-		if prior, ok := matchers[key]; ok {
-			return fmt.Errorf("duplicate profile matcher %s: %s and %s", key, prior, p.Name)
+		manufacturer := normalise(p.Match.Manufacturer)
+		codes := append([]uint16{p.Match.ProductCode}, p.Match.ProductCodes...)
+		for _, productCode := range codes {
+			if productCode == 0 {
+				return fmt.Errorf("profile %s has a zero product-code alias", p.Name)
+			}
+			key := fmt.Sprintf("%s:%04x", manufacturer, productCode)
+			if prior, ok := matchers[key]; ok {
+				return fmt.Errorf("duplicate profile matcher %s: %s and %s", key, prior, p.Name)
+			}
+			matchers[key] = p.Name
 		}
-		matchers[key] = p.Name
 		seenRaw := map[uint16]monitor.Input{}
 		for logical, raw := range p.Inputs {
 			if logical == "" {
@@ -158,6 +176,18 @@ func (r *Registry) validate() error {
 		}
 	}
 	return nil
+}
+
+func matchesProductCode(matcher EDIDMatcher, productCode uint16) bool {
+	if matcher.ProductCode == productCode {
+		return true
+	}
+	for _, candidate := range matcher.ProductCodes {
+		if candidate == productCode {
+			return true
+		}
+	}
+	return false
 }
 
 func normalise(value string) string {

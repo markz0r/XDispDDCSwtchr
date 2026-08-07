@@ -2,8 +2,8 @@
 test/**
 test-artifacts/
 .gocache/
-xdispddcswtchr
-xdispddswtchr
-xdispddcswtchr.exe
-xdispddcswtchr-qualify
-xdispddcswtchr-qualify.exe
+/xdispddcswtchr
+/xdispddswtchr
+/xdispddcswtchr.exe
+/xdispddcswtchr-qualify
+/xdispddcswtchr-qualify.exe

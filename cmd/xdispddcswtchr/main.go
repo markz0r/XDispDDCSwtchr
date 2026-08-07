@@ -48,6 +48,11 @@ func run(ctx context.Context, args []string) int {
 			fmt.Fprintln(os.Stderr, err)
 			return cli.ExitCode(err)
 		}
+		store := config.NewQualificationStore(path)
+		if err := runtime.Service.ConfigureUserQualifications(settings.UserQualifications, store.Save); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return cli.ExitCode(err)
+		}
 		program := tea.NewProgram(tui.New(runtime.Service, settings.PreferredMonitorID))
 		if _, err := program.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

@@ -51,11 +51,12 @@ type EDID struct {
 }
 
 type InputSource struct {
-	VCPCode        string               `json:"vcp_code"`
-	ReadSupported  bool                 `json:"read_supported"`
-	CurrentRaw     *uint16              `json:"current_raw,omitempty"`
-	CurrentLogical monitor.Input        `json:"current_logical,omitempty"`
-	ProfileValues  []monitor.InputValue `json:"profile_values,omitempty"`
+	VCPCode        string                   `json:"vcp_code"`
+	ReadSupported  bool                     `json:"read_supported"`
+	CurrentRaw     *uint16                  `json:"current_raw,omitempty"`
+	CurrentLogical monitor.Input            `json:"current_logical,omitempty"`
+	ProfileValues  []monitor.InputValue     `json:"profile_values,omitempty"`
+	DetectedValues []monitor.InputCandidate `json:"detected_values,omitempty"`
 }
 
 type Timings struct {
@@ -90,6 +91,8 @@ type BuildOptions struct {
 	ReadError           error
 	Redact              bool
 	QualificationRecord string
+	Capabilities        *monitor.CapabilityReport
+	CapabilityError     error
 }
 
 func Build(options BuildOptions) Bundle {
@@ -126,6 +129,13 @@ func Build(options BuildOptions) Bundle {
 	}
 	if options.ReadError != nil {
 		bundle.Errors = append(bundle.Errors, options.ReadError.Error())
+	}
+	if options.Capabilities != nil {
+		bundle.CapabilitiesRaw = options.Capabilities.Raw
+		bundle.InputSource.DetectedValues = append([]monitor.InputCandidate(nil), options.Capabilities.Inputs...)
+	}
+	if options.CapabilityError != nil {
+		bundle.Errors = append(bundle.Errors, options.CapabilityError.Error())
 	}
 	return bundle
 }

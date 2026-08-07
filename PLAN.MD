@@ -4,7 +4,7 @@
 
 - **Status:** Implementation and validation plan
 - **Plan revision:** 2
-- **Last authoritative-source review:** 2026-08-06
+- **Last authoritative-source review:** 2026-08-07
 - **Primary language:** Go
 - **Required Go baseline:** Go 1.26.5 (`go 1.26.0`, pinned CI toolchain)
 - **Distributed command:** `xdispddcswtchr`
@@ -32,15 +32,23 @@ Support is incremental. A release may support only a subset of the planned matri
 
 ### 1.1 Current repository baseline
 
-This repository already contains an older hotkey-driven application and is not a blank-slate bootstrap:
+The controlled legacy replacement is complete for the current incremental
+slice:
 
-- The current module declares Go 1.21 and depends on `github.com/robotn/gohook`.
-- The current implementation exposes hotkeys, PIP/PBP actions, third-party CLI backends, raw model configuration, and incomplete native backends.
-- `go test ./...` reports packages with `[no test files]`; this is compilation evidence, not functional validation.
-- Linux and Windows `CGO_ENABLED=0` cross-builds fail through the legacy `gohook` dependency.
-- Compiled executables and a macOS preference-plist workaround exist in the working tree and are not part of the target architecture.
-
-Implementation therefore begins with a controlled replacement of the legacy architecture, while preserving unrelated or pre-existing user work in the worktree.
+- The module and validation scripts pin Go 1.26.5 and Bubble Tea v2.
+- The normal runtime has no hotkey, PIP/PBP, arbitrary-VCP, or external
+  monitor-control executable path.
+- Common domain, EDID, profiles, support matrix, service, CLI, TUI,
+  diagnostics, deterministic fake backend, and guarded qualification code are
+  implemented with automated tests.
+- Apple Silicon macOS native discovery and VCP `0x60` reads have read-only
+  evidence for the attached Dell S3423DWC and U4025QW; normal writes remain
+  support-matrix gated and are not yet hardware-qualified.
+- DDC/CI capability retrieval and bounded `vcp(60(...))` parsing are
+  implemented as advisory read paths. The TUI can resolve an advisory into an
+  exact, persisted local user qualification after reviewing every value; this
+  remains distinct from release support qualification.
+- Windows and Linux native backends remain planned.
 
 ---
 
@@ -264,7 +272,17 @@ The TUI must support these states:
 4. **Input selection**
    - List only verified logical inputs from the selected monitor profile.
    - Show the current input where it can be read.
-   - Do not expose unverified raw values in the normal view.
+   - Do not place unreviewed raw values in the selectable input list. An
+     explicit read-only capability diagnostic shows them in a clearly labelled
+     advisory section and cannot itself initiate a write.
+   - When the selected monitor is not release-qualified, automatically offer a
+     guided local qualification: review every advertised raw value, accept or
+     correct its logical label, or skip it.
+   - Unknown/vendor values default to `skip`; duplicate logical labels and raw
+     values are rejected.
+   - Show an explicit final summary before persisting. Explain that persistence
+     enables only this exact local identity/endpoint and does not create a
+     release support claim or perform a monitor write.
 
 5. **Switching**
    - Run the hardware operation as a Bubble Tea command.
@@ -274,6 +292,8 @@ The TUI must support these states:
 6. **Result**
    - Distinguish:
      - Confirmed success
+     - Assumed success because Set succeeded but the display provided no valid
+       read-back after the configured attempts
      - Write accepted; read-back unavailable because the display path changed
      - Failed
      - Timed out
@@ -298,6 +318,8 @@ The TUI must support these states:
 | `esc` | Return to previous view |
 | `r` | Re-enumerate monitors |
 | `d` | Open focused diagnostics |
+| `c` | Read and show monitor-advertised VCP `0x60` candidates (advisory) |
+| `a` | Review and resolve the current advisory into a local user qualification |
 | `?` | Toggle help |
 | `q`, `ctrl+c` | Quit |
 
@@ -582,28 +604,45 @@ A logical input name must be resolved through a monitor profile. The tool must n
 ### 7.5 Verification result
 
 ```go
-type VerificationResult uint8
+type VerificationResult string
 
 const (
-    VerificationUnknown VerificationResult = iota
-    VerificationWriteAccepted
-    VerificationConfirmed
-    VerificationDisplayPathChanged
+    VerificationUnknown            VerificationResult = "unknown"
+    VerificationWriteAccepted      VerificationResult = "write-accepted"
+    VerificationConfirmed          VerificationResult = "confirmed"
+    VerificationAssumedSuccess     VerificationResult = "assumed-success"
+    VerificationDisplayPathChanged VerificationResult = "display-path-changed"
 )
 
 type SwitchResult struct {
-    Monitor      MonitorRef
-    Target       InputValue
-    Verification VerificationResult
-    Observed     *InputValue
-    Attempts     int
-    Duration     time.Duration
+    Monitor              MonitorRef
+    Target               InputValue
+    Verification         VerificationResult
+    Observed             *InputValue
+    Attempts             int
+    VerificationAttempts int
+    VerificationIssue    *VerificationIssue
+    Duration             time.Duration
 }
 ```
 
 A successful DDC write followed by loss of the current display path may be a successful switch rather than a failure.
 
-`VerificationConfirmed`, `VerificationDisplayPathChanged`, and profile-authorised `VerificationWriteAccepted` are successful command outcomes. `VerificationUnknown` is not a confirmed success and must produce the verification-failure CLI exit class when the active profile requires verification.
+`VerificationConfirmed`, `VerificationAssumedSuccess`,
+`VerificationDisplayPathChanged`, and profile-authorised
+`VerificationWriteAccepted` are successful normal-application command
+outcomes. Assumed success is permitted only after Set returned success and a
+display-side read-back failure remained after the configured attempts. It must
+carry a stable issue category, human detail, and raw reply hex when bytes were
+received. Cancellation, permission/backend/configuration errors, and any Set
+failure remain errors. `VerificationUnknown` means a valid read-back differed
+from the target and must produce the verification-failure CLI exit class.
+
+The TUI renders assumed success exactly as `Assumed success [no read-back
+provided by display]`, clears rather than guesses the current input, suppresses
+the error banner, and advises `r` rediscovery. The CLI returns exit `0` and JSON
+schema version `2`. Qualification-only output may record this partial result,
+but assumed success is never sufficient release-support evidence.
 
 ### 7.6 Identity and support states
 
@@ -798,15 +837,34 @@ Timeout semantics must be explicit per backend:
 
 ### 10.4 Capability string
 
-Capability retrieval is optional and diagnostic.
+Capability retrieval is optional at the backend boundary and diagnostic. The
+Apple Silicon macOS backend implements the DDC/CI `0xF3` request and multi-part
+`0xE3` reply sequence. The CLI exposes `input detect` (with `input probe` and
+`input capabilities` aliases), and diagnostic bundles retain the raw string and
+typed VCP `0x60` candidates.
 
 Rules:
 
 1. Discovery must not fail because capability retrieval fails.
 2. Profile matching must use EDID identity, not the capability string.
 3. Known profile mappings override capability-string guesses.
-4. Capability data may confirm but must not automatically authorise untested input values.
+4. Capability data may confirm but must not automatically authorise untested
+   input values. Local authorisation requires explicit review of every
+   advertised value and final user confirmation in the TUI.
 5. Store the raw string in diagnostic output when successfully retrieved.
+6. Bound each fragment to 32 data bytes and the assembled string to 16 KiB;
+   reject checksum, source, opcode, offset, length, and malformed-text errors.
+7. Label only MCCS values represented by the common application model. Preserve
+   unknown vendor values as raw candidates.
+8. Mark detected candidates write-qualified only when the embedded exact
+   support-matrix gate or an exact persisted local user qualification
+   authorises the same mapping.
+9. A local approval must be scoped to stable monitor ID, EDID digest,
+   manufacturer/product/model, connector, backend, reviewed capability digest,
+   and acceptance time. Any identity or endpoint mismatch invalidates it.
+10. Before every locally qualified write, retrieve the capability string again
+    and require it to match the reviewed digest and still advertise the target
+    raw value. Failure blocks the write and requires a new review.
 
 ### 10.5 Protocol conformance tests
 
@@ -815,9 +873,14 @@ The repository must contain normative golden vectors for the DDC/CI request and 
 - Get VCP request.
 - Get VCP reply with continuous and non-continuous type metadata.
 - Set VCP request.
+- Capabilities request at multiple offsets and capabilities reply fragments.
 - Length and source-address validation.
 - Checksum generation and rejection.
 - Truncated, oversized, malformed, unsupported, and unexpected-code replies.
+- Standard 11-byte Get VCP replies and the exact Apple CoreDisplay compact
+  representation reconstructed only at the macOS backend boundary.
+- Compact-form rejection for non-zero padding, wrong code, bad checksum, and
+  every shape other than the exact eight-byte suffix plus three zero bytes.
 
 Seed fuzz targets from these vectors for packet and capability parsers. Normal application packages must not export a generic VCP API, even though the internal transport framing is generic.
 
@@ -846,6 +909,7 @@ type Profile struct {
 type EDIDMatcher struct {
     Manufacturer string
     ProductCode  uint16
+    ProductCodes []uint16 // additional observed EDID/PNP variants
     ModelNames   []string
 }
 
@@ -858,7 +922,12 @@ const (
 )
 ```
 
-Profiles describe hardware identity and verified logical-to-raw mappings. They do not, by themselves, make every OS/connector combination supported. Normal switching additionally requires a matching entry in `qualification/support-matrix.json`.
+Profiles describe hardware identity and verified logical-to-raw mappings. They
+do not, by themselves, make every OS/connector combination supported. A
+release-supported switch requires a matching entry in
+`qualification/support-matrix.json`. A separate local `user-qualified` path may
+enable only user-reviewed mappings on an exact identity/endpoint, without
+altering the embedded profile or making a release support claim.
 
 The tracked support matrix keys a claim by:
 
@@ -1235,8 +1304,11 @@ Validate descriptor generation
 Match verified monitor profile
         ↓
 Match qualified platform/monitor/connector support slice
+or exact persisted local user qualification
         ↓
 Resolve logical input to raw value
+        ↓
+For a local qualification, re-read and match reviewed capabilities
         ↓
 Open OS-specific input session
         ↓
@@ -1265,6 +1337,7 @@ Verification must be profile-controlled.
 The user-visible result should distinguish:
 
 - Confirmed switch
+- Assumed success with no display-provided valid read-back
 - Write accepted, no read-back
 - Display path changed
 - Switch failed
@@ -1332,12 +1405,24 @@ xdispddcswtchr diagnose --monitor <id> --output diagnostic.json
 
 ### 16.6 Guarded qualification command
 
+Before capture or write qualification, the separately built qualification
+binary must expose an identity-scoped, read-only `input preflight` operation.
+It reports the observed raw VCP `0x60` value, the documented physical input
+choices for a known monitor model, and a machine-readable assessment of which
+facts remain operator-confirmed. Preflight must state explicitly that current
+OSD text, a live safe target, external dock/adapter/KVM identity, and a physical
+recovery method cannot be proven by a VCP read. It must never scan or write
+candidate raw values.
+
 To record a value after an operator manually selects an input through the monitor OSD:
 
 ```text
 xdispddcswtchr-qualify input capture \
     --monitor <id> \
-    --label hdmi-1
+    --expected-model <exact-model> \
+    --expected-edid-sha256 <sha256> \
+    --label hdmi-1 \
+    --osd-label 'HDMI 1'
 ```
 
 This executable is built explicitly with `-tags qualification` and is not
@@ -1361,12 +1446,12 @@ The process exit classes are stable public behaviour:
 
 | Code | Class | Examples |
 |---:|---|---|
-| `0` | Success | Read completed; switch confirmed; qualified write accepted; display path changed as expected |
+| `0` | Success | Read completed; switch confirmed; normal application assumed success after a successful Set; qualified write accepted; display path changed as expected |
 | `2` | Usage or configuration | Invalid flags, non-TTY default invocation, unsupported/legacy configuration schema |
 | `3` | Selection or support | No monitor, not found, ambiguous identity, unsupported monitor/input, unqualified slice |
 | `4` | Backend or permission | Backend unavailable, private symbol missing, endpoint missing, permission denied, DDC disabled |
 | `5` | Transport | Timeout, malformed reply, checksum, disconnection, rejected write |
-| `6` | Verification | The write returned but required verification did not reach an accepted outcome |
+| `6` | Verification | A valid read-back differed from the target, or qualification evidence remained incomplete (including assumed success) |
 
 Wrapped native errors must map to one of these classes while retaining detailed diagnostic context.
 
@@ -1484,6 +1569,10 @@ A qualification record is immutable evidence. Corrections create a new record an
 
 Qualification requirements:
 
+- The operator-provided Windows capability enumeration records USB-C `0x1B`,
+  HDMI-1 `0x11`, and HDMI-2 `0x12`; these values populate the model profile.
+- Treat EDID/PNP product codes `0xD155` and `0xD15B` as observed identity
+  variants only when the exact Dell model name also matches.
 - Confirm EDID identity and product code.
 - Confirm input values for every required HDMI, DisplayPort, and USB-C path.
 - Confirm DDC/CI OSD requirement.
@@ -1495,6 +1584,13 @@ Qualification requirements:
 
 Qualification requirements:
 
+- The operator-provided Windows capability enumeration records DisplayPort-1
+  `0x0F`, HDMI-1 `0x11`, and an otherwise unlabeled `0x19`. The profile maps
+  `0x19` to Thunderbolt-1 because Thunderbolt is the model's only remaining
+  documented physical video input; retain this as an explicit inference until
+  the OSD label is observed during a write/recovery test.
+- Treat EDID/PNP product codes `0x4308` and `0x4318` as observed identity
+  variants only when the exact Dell model name also matches.
 - Confirm EDID identity over Thunderbolt/USB-C, DisplayPort, and HDMI.
 - Test each connector independently.
 - Determine whether Thunderbolt and USB-C use one or multiple raw VCP values.
@@ -1507,6 +1603,12 @@ Qualification requirements:
 
 Qualification requirements:
 
+- The operator-provided Windows capability enumeration for `GSM9E9E` records
+  HDMI-1 `0x11`, HDMI-2 `0x12`, DisplayPort-1 `0x0F`, and DisplayPort-2 `0x10`;
+  these values populate the model profile exactly as supplied.
+- Current LG specifications describe one physical DisplayPort input plus USB-C.
+  Determine whether the reported DisplayPort-2 value represents USB-C before
+  making a physical-connector or normal-runtime support claim.
 - Confirm VCP `0x60` can be read and written.
 - Capture the capability string where available.
 - Determine raw values for each physical connector.
@@ -1566,6 +1668,8 @@ var (
     ErrAmbiguousMonitor        = errors.New("monitor identity is ambiguous")
     ErrUnsupportedMonitor      = errors.New("monitor has no verified input profile")
     ErrUnqualifiedSlice        = errors.New("platform and monitor combination is not qualified")
+    ErrQualificationUnavailable = errors.New("user qualification persistence is unavailable")
+    ErrUserQualificationStale  = errors.New("saved user qualification no longer matches advertised capabilities")
     ErrUnknownInput            = errors.New("input is not defined by the monitor profile")
     ErrUnsupportedConfigSchema = errors.New("configuration schema is unsupported")
     ErrPermissionDenied        = errors.New("permission denied")
@@ -1609,18 +1713,26 @@ Configuration may include:
 - TUI behaviour
 - Debug log path
 - Diagnostic redaction preference
+- Application-managed, exact local user-qualification records
 
-Do not permit normal configuration to override verified raw profile values silently.
+Do not permit normal configuration to override embedded profile values
+silently. Local user qualifications are a separate state and profile namespace,
+are visibly labelled `user-qualified`, and never become release support data.
 
 The legacy schema containing `hotkeys`, PIP/PBP, backend executable paths, arbitrary VCP codes, raw input maps, or `backend: cli` is rejected with `ErrUnsupportedConfigSchema`. There is no compatibility mode.
 
-If local profile overrides are introduced for qualification:
+Local user qualifications must:
 
-- Store them separately.
-- Mark them unverified.
-- Require explicit enablement.
-- Display a warning in the TUI.
-- Never merge them into release profiles without hardware evidence.
+- Be created or revised only through the guided TUI review.
+- Be stored separately from embedded profiles and the tracked support matrix.
+- Be written atomically with owner-only permissions.
+- Contain exact identity, endpoint, capability digest, accepted mappings, and
+  acceptance timestamp.
+- Be ignored when identity or endpoint matching fails.
+- Be revalidated against a fresh capability read before every write.
+- Display a clear TUI warning and `user-qualified` support state.
+- Never merge into release profiles or support claims without guarded hardware
+  evidence and a reviewed support-matrix change.
 
 ---
 
@@ -1709,7 +1821,10 @@ Run only on an explicitly selected host/monitor:
 1. Enumerate and correlate the selected stable ID.
 2. Validate the expected model and hashed EDID identity.
 3. Read VCP `0x60` and generate a sanitized diagnostic artifact.
-4. Perform no monitor write.
+4. Retrieve and parse the capability string into a separate JSON artifact and
+   require VCP `0x60` to advertise at least one candidate value for capability
+   qualification runs.
+5. Perform no monitor write.
 
 #### `hardware-write`
 
@@ -1722,7 +1837,10 @@ Test:
 - EDID base/extension lengths, checksums, manufacturer decoding, little-endian product code, descriptors, malformed data, and sanitized fixtures.
 - Hardware-stable ID generation, duplicate serials, text-serial fallback, topology-scoped identity, ambiguity, and hash determinism.
 - DDC golden frames, malformed replies, checksums, bounds, unsupported result codes, and wrong VCP-code replies.
-- Capability-string bounds and malformed input.
+- Capability-string compact/spaced syntax, nesting, duplicates, bounds, and malformed input.
+- Capability report precedence (profile, MCCS standard, unmapped), qualification
+  isolation, local user-qualification persistence/revalidation, CLI text/JSON,
+  and diagnostic inclusion.
 - Profile matching, duplicate matcher rejection, logical/raw mapping, aliases, unverified values, and support-matrix matching.
 - Retry classification using an injected clock/sleeper and no real sleeps.
 - Verification state transitions and `SwitchResult` contents.
@@ -1743,7 +1861,9 @@ Every backend adapter and the fake backend must pass the applicable common contr
 - Cancellation follows the owned-worker rules.
 - Native resources remain owned until any uncancellable call returns.
 - Native resources are released on success and every partial-failure path.
-- Switching is rejected for ambiguous, unprofiled, experimental, or unqualified normal-operation slices.
+- Switching is rejected for ambiguous monitors and for unprofiled,
+  experimental, or unqualified slices unless an exact persisted user
+  qualification matches and its reviewed capabilities are freshly revalidated.
 - Display-path disappearance, reconnect, timeout, and duplicate completion messages produce deterministic results.
 
 Linux tests use fake sysfs trees and an injected ioctl adapter. Windows tests run natively and cover structure sizes, UTF-16 bounds, CCD retry/correlation, partial handle acquisition, and cleanup. macOS tests cover the C ABI, symbol lookup, CF/IOKit ownership, service correlation, and missing-symbol behaviour.
@@ -1756,10 +1876,14 @@ Use Bubble Tea v2 messages directly to test:
 - Monitor and input selection.
 - `tea.KeyPressMsg` key handling.
 - Write in progress and duplicate-write prevention.
-- Confirmed, accepted, display-path-changed, failed, and unknown results.
+- Confirmed, accepted, assumed-success, display-path-changed, failed, and
+  unknown results, including exact advisory wording and current-input clearing.
 - Operation-ID and generation mismatch suppression.
 - Re-enumeration, cancellation, help, quit, and very small terminal sizes.
 - Semantic view content without brittle full-screen snapshots.
+- Automatic unqualified-monitor prompting; accept/relabel/skip review of every
+  candidate; duplicate rejection; cancel/retry; explicit persistence summary;
+  and post-save rediscovery.
 
 CLI tests cover:
 
@@ -2099,6 +2223,9 @@ Exit criteria:
 - A monitor operation uses a stable ID plus the current enumeration generation,
   never an enumeration index or stale native handle.
 - Unsupported or ambiguous monitors cannot be switched through a guessed logical mapping.
+- An unqualified monitor can be made locally usable only through explicit,
+  complete TUI review; that state is labelled `user-qualified`, scoped to its
+  exact identity/endpoint, and revalidated before every write.
 - Only VCP `0x60` is used by normal application operations.
 - Hardware I/O never blocks the Bubble Tea update loop.
 - Native handles are not retained in UI state.
@@ -2358,12 +2485,15 @@ For the supported Dell monitors:
 ### Dell S3423DWC
 
 - DDC/CI transport is supported by vendor tooling/documentation.
-- Exact input values require capture.
+- Tracked capability evidence maps USB-C `0x1B`, HDMI-1 `0x11`, and HDMI-2
+  `0x12`; write/readback and recovery evidence remain required per platform.
 - PIP/PBP and USB behaviour require qualification.
 
 ### Dell U4025QW
 
 - DDC/CI input switching is expected.
+- Tracked capability evidence maps DP-1 `0x0F`, HDMI-1 `0x11`, and infers
+  Thunderbolt-1 `0x19` from the exhaustive documented physical-input set.
 - Thunderbolt/USB-C, DisplayPort, and HDMI must be tested separately.
 - KVM or USB upstream switching may be automatic firmware behaviour but is outside the tool’s claimed function.
 
@@ -2371,6 +2501,9 @@ For the supported Dell monitors:
 
 - Vendor software exists for Windows and macOS, but it must not be a runtime dependency.
 - A model-specific public MCCS/VCP table is not assumed.
+- Tracked capability evidence maps HDMI-1 `0x11`, HDMI-2 `0x12`, DP-1 `0x0F`,
+  and the supplied DP-2 label to `0x10`; its relationship to the model's
+  physical USB-C input is unresolved.
 - VCP `0x60`, input values, dual-mode behaviour, HDR, VRR, and gaming-mode effects require physical qualification.
 - OLED-specific functions are outside scope.
 

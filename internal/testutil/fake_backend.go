@@ -9,23 +9,26 @@ import (
 )
 
 type FakeBackend struct {
-	mu               sync.Mutex
-	Generation       monitor.Generation
-	Descriptors      []monitor.Descriptor
-	Inputs           map[string]uint16
-	EnumerateError   error
-	OpenError        error
-	GetError         error
-	SetError         error
-	GetErrors        []error
-	SetErrors        []error
-	GetCalls         int
-	SetCalls         []SetCall
-	IgnoreSets       bool
-	OperationStarted chan string
-	OperationRelease <-chan struct{}
-	active           int
-	MaxActive        int
+	mu                sync.Mutex
+	Generation        monitor.Generation
+	Descriptors       []monitor.Descriptor
+	Inputs            map[string]uint16
+	Capabilities      map[string]string
+	EnumerateError    error
+	OpenError         error
+	GetError          error
+	CapabilitiesError error
+	SetError          error
+	GetErrors         []error
+	SetErrors         []error
+	GetCalls          int
+	CapabilitiesCalls int
+	SetCalls          []SetCall
+	IgnoreSets        bool
+	OperationStarted  chan string
+	OperationRelease  <-chan struct{}
+	active            int
+	MaxActive         int
 }
 
 type SetCall struct {
@@ -129,6 +132,27 @@ func (s *fakeSession) SetInputRaw(ctx context.Context, value uint16) error {
 	s.backend.SetCalls = append(s.backend.SetCalls, SetCall{MonitorID: s.id, Value: value})
 	s.backend.mu.Unlock()
 	return nil
+}
+
+func (s *fakeSession) Capabilities(ctx context.Context) (string, error) {
+	if err := s.begin(ctx); err != nil {
+		return "", err
+	}
+	defer s.end()
+	if err := s.wait(ctx); err != nil {
+		return "", err
+	}
+	s.backend.mu.Lock()
+	defer s.backend.mu.Unlock()
+	s.backend.CapabilitiesCalls++
+	if s.backend.CapabilitiesError != nil {
+		return "", s.backend.CapabilitiesError
+	}
+	value, ok := s.backend.Capabilities[s.id]
+	if !ok {
+		return "", monitor.ErrCapabilitiesUnsupported
+	}
+	return value, nil
 }
 
 func (s *fakeSession) Close() error {

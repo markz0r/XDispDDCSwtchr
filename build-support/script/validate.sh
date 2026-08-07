@@ -63,7 +63,7 @@ run_full() {
     go test -count=10 ./internal/service ./internal/tui | tee "$artifact_dir/go-test-repeat.log"
     go test -covermode=atomic -coverprofile="$artifact_dir/coverage.out" ./... | tee "$artifact_dir/go-test-coverage.log"
     go tool cover -func="$artifact_dir/coverage.out" >"$artifact_dir/coverage.txt"
-    for package in ddc edid profiles service; do
+    for package in capabilities ddc edid profiles service; do
         profile="$artifact_dir/coverage-$package.out"
         go test -covermode=atomic -coverprofile="$profile" "./internal/$package" | tee "$artifact_dir/coverage-$package.log"
         go tool cover -func="$profile" >"$artifact_dir/coverage-$package.txt"
@@ -73,10 +73,10 @@ run_full() {
             return 1
         fi
     done
-    common_cover_packages='./internal/cli,./internal/config,./internal/ddc,./internal/diagnostics,./internal/edid,./internal/monitor,./internal/platform,./internal/profiles,./internal/service,./internal/tui'
+    common_cover_packages='./internal/capabilities,./internal/cli,./internal/config,./internal/ddc,./internal/diagnostics,./internal/edid,./internal/monitor,./internal/platform,./internal/profiles,./internal/service,./internal/tui,./internal/verification'
     go test -covermode=atomic -coverpkg="$common_cover_packages" -coverprofile="$artifact_dir/coverage-common.out" \
-        ./internal/cli ./internal/config ./internal/ddc ./internal/diagnostics ./internal/edid ./internal/monitor \
-        ./internal/platform ./internal/profiles ./internal/service ./internal/tui | tee "$artifact_dir/coverage-common.log"
+        ./internal/capabilities ./internal/cli ./internal/config ./internal/ddc ./internal/diagnostics ./internal/edid ./internal/monitor \
+        ./internal/platform ./internal/profiles ./internal/service ./internal/tui ./internal/verification | tee "$artifact_dir/coverage-common.log"
     go tool cover -func="$artifact_dir/coverage-common.out" >"$artifact_dir/coverage-common.txt"
     common_percentage=$(awk '/^total:/{gsub(/%/, "", $3); print $3}' "$artifact_dir/coverage-common.txt")
     if ! awk -v percentage="$common_percentage" 'BEGIN { exit !(percentage + 0 >= 80) }'; then
@@ -159,10 +159,12 @@ run_hardware_read() {
     require_hardware_identity
     build_binaries
     "$artifact_dir/xdispddcswtchr" diagnose --monitor "$monitor_id" --output "$artifact_dir/read-diagnostic.json" >"$artifact_dir/diagnose.stdout"
+    "$artifact_dir/xdispddcswtchr" input detect --monitor "$monitor_id" --json >"$artifact_dir/input-capabilities.json"
     grep -Fq "\"id\": \"$monitor_id\"" "$artifact_dir/read-diagnostic.json"
     grep -Fq "\"model_name\": \"$expected_model\"" "$artifact_dir/read-diagnostic.json"
     grep -Fq "\"sha256\": \"$expected_edid\"" "$artifact_dir/read-diagnostic.json"
     grep -Fq '"enabled": true' "$artifact_dir/read-diagnostic.json"
+    grep -Fq '"input_source_advertised": true' "$artifact_dir/input-capabilities.json"
 }
 
 run_hardware_write() {

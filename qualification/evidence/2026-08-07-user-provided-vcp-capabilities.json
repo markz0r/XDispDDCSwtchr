@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-06T20:06:05Z",
+  "evidence_class": "user-provided-vcp-capability-enumeration",
+  "mapping_claim": true,
+  "support_claim": false,
+  "source": {
+    "type": "operator-provided",
+    "external_runtime_dependency": null
+  },
+  "profiles": [
+    {
+      "profile": "LG UltraGear OLED 45GX950A-B",
+      "reported_name": "LG ULTRAGEAR+",
+      "windows_monitor_id": "\\\\?\\DISPLAY#GSM9E9E#5&2f2a97d&0&UID4357",
+      "manufacturer": "GSM",
+      "product_code": 40606,
+      "inputs": {
+        "displayport-1": 15,
+        "displayport-2": 16,
+        "hdmi-1": 17,
+        "hdmi-2": 18
+      },
+      "notes": [
+        "Mappings preserve the operator-provided capability labels literally.",
+        "The target model has one physical DisplayPort plus USB-C; whether reported DisplayPort-2 represents USB-C remains a hardware-qualification question."
+      ]
+    },
+    {
+      "profile": "Dell U4025QW",
+      "reported_name": "DELL U4025QW",
+      "windows_monitor_id": "\\\\?\\DISPLAY#DEL4318#5&361171c4&0&UID524",
+      "manufacturer": "DEL",
+      "product_code": 17176,
+      "inputs": {
+        "displayport-1": 15,
+        "hdmi-1": 17,
+        "thunderbolt-1": 25
+      },
+      "notes": [
+        "Raw 0x19 is assigned to Thunderbolt-1 because the documented model inputs are Thunderbolt, DisplayPort, and HDMI and the latter two were explicitly mapped by the supplied enumeration."
+      ]
+    },
+    {
+      "profile": "Dell S3423DWC",
+      "reported_name": "DELL S3423DWC",
+      "windows_monitor_id": "\\\\?\\DISPLAY#DELD15B#4&1fa27b2c&0&UID24647",
+      "manufacturer": "DEL",
+      "product_code": 53595,
+      "inputs": {
+        "hdmi-1": 17,
+        "hdmi-2": 18,
+        "usb-c-1": 27
+      },
+      "notes": []
+    }
+  ],
+  "limitations": [
+    "Capability enumeration does not prove that a write succeeds or that readback verification works.",
+    "No OS version, backend implementation, EDID SHA-256, connector topology, write timing, switch-away result, or recovery test was supplied.",
+    "These mappings do not create a normal-runtime support record."
+  ]
+}

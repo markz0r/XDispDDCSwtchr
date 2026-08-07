@@ -38,12 +38,15 @@ func TestBuildUnredactedCurrentAndErrorStates(t *testing.T) {
 		Descriptor: monitor.Descriptor{ID: "mon", Serial: "visible", EDID: raw, EDIDSHA256: "hash", BackendName: "fake"},
 		Current:    &current, Inputs: []monitor.InputValue{current}, ReadDuration: 12 * time.Millisecond,
 		ReadError: errors.New("read failed"), QualificationRecord: "record.json",
+		Capabilities:    &monitor.CapabilityReport{Raw: "(vcp(60(11)))", Inputs: []monitor.InputCandidate{{Raw: 0x11, Logical: monitor.InputHDMI1, MappingSource: monitor.InputMappingProfile}}},
+		CapabilityError: errors.New("capability warning"),
 	})
 	if bundle.Redaction.Enabled || bundle.Monitor.Serial != "visible" || bundle.EDID.Raw == "" || bundle.EDID.ChecksumValid {
 		t.Fatalf("unexpected unredacted bundle: %+v", bundle)
 	}
 	if bundle.InputSource.CurrentRaw == nil || *bundle.InputSource.CurrentRaw != 0x11 || bundle.InputSource.ReadSupported ||
-		len(bundle.Errors) != 1 || bundle.Timings.ReadMilliseconds != 12 || bundle.Support.QualificationRecord != "record.json" {
+		len(bundle.Errors) != 2 || bundle.Timings.ReadMilliseconds != 12 || bundle.Support.QualificationRecord != "record.json" ||
+		bundle.CapabilitiesRaw == "" || len(bundle.InputSource.DetectedValues) != 1 {
 		t.Fatalf("unexpected input/error state: %+v", bundle)
 	}
 	if got := redact(""); got != "" {

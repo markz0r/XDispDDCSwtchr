@@ -22,6 +22,22 @@ func TestEncodeSetVCPGolden(t *testing.T) {
 	}
 }
 
+func TestEncodeCapabilitiesRequestGolden(t *testing.T) {
+	tests := []struct {
+		offset uint16
+		want   []byte
+	}{
+		{0, []byte{0x51, 0x83, 0xf3, 0x00, 0x00, 0x4f}},
+		{0x0020, []byte{0x51, 0x83, 0xf3, 0x00, 0x20, 0x6f}},
+		{0x1234, []byte{0x51, 0x83, 0xf3, 0x12, 0x34, 0x69}},
+	}
+	for _, tt := range tests {
+		if got := EncodeCapabilitiesRequest(tt.offset); !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("offset=0x%04x got % x want % x", tt.offset, got, tt.want)
+		}
+	}
+}
+
 func TestParseGetVCPReply(t *testing.T) {
 	reply := validReply()
 	got, err := ParseGetVCPReply(reply, VCPInputSource)
@@ -82,6 +98,79 @@ func TestParseGetVCPReplyRejectsCorruption(t *testing.T) {
 	}
 }
 
+func TestParseGetVCPReplyRetainsRawBytesOnFailure(t *testing.T) {
+	reply := []byte{0x00, 0x60, 0x00}
+	_, err := ParseGetVCPReply(reply, VCPInputSource)
+	raw, ok := ReplyBytes(err)
+	if !ok || !reflect.DeepEqual(raw, reply) {
+		t.Fatalf("raw=% x ok=%v", raw, ok)
+	}
+	raw[0] = 0xff
+	again, _ := ReplyBytes(err)
+	if again[0] != 0x00 {
+		t.Fatalf("ReplyBytes did not return a defensive copy: % x", again)
+	}
+}
+
+func TestParseCapabilitiesReply(t *testing.T) {
+	reply := validCapabilitiesReply(0x20, []byte("60(0F 11 12)"))
+	fragment, err := ParseCapabilitiesReply(reply, 0x20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fragment.Offset != 0x20 || string(fragment.Data) != "60(0F 11 12)" {
+		t.Fatalf("unexpected fragment: %+v", fragment)
+	}
+
+	empty, err := ParseCapabilitiesReply(validCapabilitiesReply(0x2e, nil), 0x2e)
+	if err != nil || empty.Offset != 0x2e || len(empty.Data) != 0 {
+		t.Fatalf("empty=%+v err=%v", empty, err)
+	}
+}
+
+func TestParseCapabilitiesReplyRejectsProtocolErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func([]byte)
+		want error
+	}{
+		{"source", func(reply []byte) { reply[0] = 0x50 }, monitor.ErrMalformedReply},
+		{"length-marker", func(reply []byte) { reply[1] &^= 0x80 }, monitor.ErrMalformedReply},
+		{"oversized", func(reply []byte) { reply[1] = 0xa4 }, monitor.ErrMalformedReply},
+		{"command", func(reply []byte) { reply[2] = 0xe2 }, monitor.ErrMalformedReply},
+		{"offset", func(reply []byte) { reply[4]++ }, monitor.ErrMalformedReply},
+		{"checksum", func(reply []byte) { reply[len(reply)-1] ^= 0xff }, monitor.ErrChecksum},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reply := validCapabilitiesReply(0, []byte("abc"))
+			tt.edit(reply)
+			if tt.name != "checksum" && tt.name != "source" && tt.name != "length-marker" && tt.name != "oversized" {
+				setReplyChecksum(reply)
+			}
+			if _, err := ParseCapabilitiesReply(reply, 0); !errors.Is(err, tt.want) {
+				t.Fatalf("error=%v want %v; reply=% x", err, tt.want, reply)
+			}
+		})
+	}
+	if _, err := ParseCapabilitiesReply([]byte{0x6e, 0x80, 0xbe}, 0); !errors.Is(err, monitor.ErrCapabilitiesUnsupported) {
+		t.Fatalf("null response error=%v", err)
+	}
+	if _, err := ParseCapabilitiesReply([]byte{0x6e, 0x80, 0x00}, 0); !errors.Is(err, monitor.ErrChecksum) {
+		t.Fatalf("corrupt null response error=%v", err)
+	}
+	if _, err := ParseCapabilitiesReply(validCapabilitiesReply(0, []byte("abc"))[:5], 0); !errors.Is(err, monitor.ErrMalformedReply) {
+		t.Fatalf("truncated error=%v", err)
+	}
+}
+
+func FuzzParseCapabilitiesReply(f *testing.F) {
+	f.Add(validCapabilitiesReply(0, []byte("(prot(monitor)")))
+	f.Fuzz(func(t *testing.T, raw []byte) {
+		_, _ = ParseCapabilitiesReply(raw, 0)
+	})
+}
+
 func FuzzParseGetVCPReply(f *testing.F) {
 	f.Add(validReply())
 	f.Fuzz(func(t *testing.T, raw []byte) {
@@ -100,4 +189,17 @@ func setReplyChecksum(reply []byte) {
 	if 2+length < len(reply) {
 		reply[2+length] = checksum(DisplayReadByte, append([]byte{HostAddress}, reply[1:2+length]...))
 	}
+}
+
+func validCapabilitiesReply(offset uint16, data []byte) []byte {
+	length := 3 + len(data)
+	reply := make([]byte, 3+length)
+	reply[0] = DisplayAddress
+	reply[1] = 0x80 | byte(length)
+	reply[2] = CapabilitiesReply
+	reply[3] = byte(offset >> 8)
+	reply[4] = byte(offset)
+	copy(reply[5:], data)
+	setReplyChecksum(reply)
+	return reply
 }

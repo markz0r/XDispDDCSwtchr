@@ -9,20 +9,33 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/markz0r/XDispDDCSwtchr/internal/config"
 	"github.com/markz0r/XDispDDCSwtchr/internal/monitor"
 	"github.com/markz0r/XDispDDCSwtchr/internal/platform"
+	"github.com/markz0r/XDispDDCSwtchr/internal/qualification"
 )
 
 type stubService struct {
-	snapshot    monitor.Snapshot
-	discoverErr error
-	current     monitor.InputValue
-	inputs      []monitor.InputValue
-	inputsErr   error
-	currentErr  error
-	switchErr   error
-	switches    int
+	snapshot        monitor.Snapshot
+	discoverErr     error
+	current         monitor.InputValue
+	inputs          []monitor.InputValue
+	inputsErr       error
+	currentErr      error
+	capabilities    monitor.CapabilityReport
+	capabilitiesErr error
+	switchErr       error
+	switchResult    monitor.SwitchResult
+	switches        int
+	configured      []qualification.Record
+	configureErr    error
+}
+
+func (s *stubService) ConfigureUserQualifications(records []qualification.Record, _ func(qualification.Record) error) error {
+	s.configured = append([]qualification.Record(nil), records...)
+	return s.configureErr
 }
 
 func (s *stubService) Discover(context.Context) (monitor.Snapshot, error) {
@@ -34,6 +47,9 @@ func (s *stubService) Inputs(monitor.MonitorRef) ([]monitor.InputValue, error) {
 func (s *stubService) GetInput(context.Context, monitor.MonitorRef) (monitor.InputValue, error) {
 	return s.current, s.currentErr
 }
+func (s *stubService) DetectInputs(context.Context, monitor.MonitorRef) (monitor.CapabilityReport, error) {
+	return s.capabilities, s.capabilitiesErr
+}
 
 func TestDiagnoseExperimentalSliceKeepsSuccessfulRawRead(t *testing.T) {
 	service := &stubService{
@@ -42,6 +58,7 @@ func TestDiagnoseExperimentalSliceKeepsSuccessfulRawRead(t *testing.T) {
 			SupportState: monitor.SupportBackendExperimental, BackendName: "fake",
 		}}},
 		current: monitor.InputValue{Raw: 0x19}, inputsErr: monitor.ErrUnqualifiedSlice,
+		capabilities: monitor.CapabilityReport{Raw: "(vcp(60(19 0F 11)))", InputSourceAdvertised: true, Inputs: []monitor.InputCandidate{{Raw: 0x19, Logical: monitor.InputThunderbolt1, MappingSource: monitor.InputMappingProfile}}, Advisory: true},
 	}
 	runner, stdout, stderr := newTestRunner(service)
 	output := filepath.Join(t.TempDir(), "diagnostic.json")
@@ -52,13 +69,21 @@ func TestDiagnoseExperimentalSliceKeepsSuccessfulRawRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "sensitive") || !strings.Contains(string(raw), `"current_raw": 25`) || !strings.Contains(string(raw), `"enabled": true`) {
+	if strings.Contains(string(raw), "sensitive") || !strings.Contains(string(raw), `"current_raw": 25`) || !strings.Contains(string(raw), `"enabled": true`) ||
+		!strings.Contains(string(raw), `"capabilities_raw": "(vcp(60(19 0F 11)))"`) || !strings.Contains(string(raw), `"detected_values"`) {
 		t.Fatalf("unexpected diagnostic: %s", raw)
 	}
 }
 func (s *stubService) Switch(_ context.Context, ref monitor.MonitorRef, input monitor.Input) (monitor.SwitchResult, error) {
 	s.switches++
-	return monitor.SwitchResult{Monitor: ref, Target: monitor.InputValue{Logical: input}}, s.switchErr
+	result := s.switchResult
+	if result.Monitor.ID == "" {
+		result.Monitor = ref
+	}
+	if result.Target.Logical == "" {
+		result.Target = monitor.InputValue{Logical: input}
+	}
+	return result, s.switchErr
 }
 
 func newTestRunner(service Service) (*Runner, *bytes.Buffer, *bytes.Buffer) {
@@ -97,8 +122,31 @@ func TestListJSONIsVersionedAndStdoutOnly(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
 		t.Fatal(err)
 	}
-	if output.SchemaVersion != 1 || output.Generation != 4 || len(output.Monitors) != 1 || stderr.Len() != 0 {
+	if output.SchemaVersion != JSONSchemaVersion || output.Generation != 4 || len(output.Monitors) != 1 || stderr.Len() != 0 {
 		t.Fatalf("unexpected output=%+v stderr=%q", output, stderr)
+	}
+}
+
+func TestInputSetAssumedSuccessExitsZeroAndEmitsDiagnostics(t *testing.T) {
+	service := &stubService{
+		snapshot: monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{ID: "mon-a", SupportState: monitor.SupportSupported}}},
+		switchResult: monitor.SwitchResult{
+			Target:       monitor.InputValue{Logical: monitor.InputThunderbolt1, Raw: 0x19},
+			Verification: monitor.VerificationAssumedSuccess, VerificationAttempts: 2,
+			VerificationIssue: &monitor.VerificationIssue{Category: monitor.VerificationIssueMalformedReply, RawReplyHex: "00600019191919d4000000"},
+		},
+	}
+	runner, stdout, stderr := newTestRunner(service)
+	code := runner.Run(context.Background(), []string{"input", "set", "--monitor", "mon-a", "--input", "thunderbolt-1"})
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "Assumed success [no read-back provided by display]") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	runner, stdout, stderr = newTestRunner(service)
+	code = runner.Run(context.Background(), []string{"input", "set", "--monitor", "mon-a", "--input", "thunderbolt-1", "--json"})
+	if code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), `"schema_version": 2`) ||
+		!strings.Contains(stdout.String(), `"verification": "assumed-success"`) || !strings.Contains(stdout.String(), `"raw_reply_hex"`) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
@@ -116,6 +164,28 @@ func TestLegacyConfigRejectedBeforeBackendInitialization(t *testing.T) {
 	code := runner.Run(context.Background(), []string{"--config", path, "list"})
 	if code != 2 || called || !strings.Contains(stderr.String(), "configuration schema is unsupported") {
 		t.Fatalf("code=%d called=%v stdout=%q stderr=%q", code, called, stdout, stderr)
+	}
+}
+
+func TestPersistedUserQualificationsAreConfiguredBeforeCLICommand(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	settings := config.Defaults()
+	settings.UserQualifications = []qualification.Record{{
+		MonitorID: "mon-a", EDIDSHA256: strings.Repeat("a", 64), Manufacturer: "DEL", ProductCode: 1,
+		Model: "Display", Connector: "direct", BackendName: "fake",
+		Inputs:           []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}},
+		CapabilitySHA256: strings.Repeat("b", 64), AcceptedAt: time.Unix(1, 0).UTC(),
+	}}
+	if err := config.Save(path, settings); err != nil {
+		t.Fatal(err)
+	}
+	service := &stubService{snapshot: monitor.Snapshot{Generation: 1, Monitors: []monitor.Descriptor{{ID: "mon-a"}}}}
+	runner, _, stderr := newTestRunner(service)
+	if code := runner.Run(context.Background(), []string{"--config", path, "list", "--json"}); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr)
+	}
+	if len(service.configured) != 1 || service.configured[0].MonitorID != "mon-a" {
+		t.Fatalf("persisted qualifications not configured: %+v", service.configured)
 	}
 }
 
@@ -155,6 +225,10 @@ func TestInputCommandsAndInspectJSON(t *testing.T) {
 		snapshot: monitor.Snapshot{Generation: 9, Monitors: []monitor.Descriptor{{ID: "mon-a", Model: "Dell", SupportState: monitor.SupportSupported}}},
 		current:  monitor.InputValue{Logical: monitor.InputHDMI1, Raw: 0x11},
 		inputs:   []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}, {Logical: monitor.InputHDMI2, Raw: 0x12}},
+		capabilities: monitor.CapabilityReport{Raw: "(vcp(60(11 12)))", InputSourceAdvertised: true, Inputs: []monitor.InputCandidate{
+			{Raw: 0x11, Logical: monitor.InputHDMI1, MappingSource: monitor.InputMappingProfile, WriteQualified: true},
+			{Raw: 0x12, Logical: monitor.InputHDMI2, MappingSource: monitor.InputMappingProfile, WriteQualified: true},
+		}, Advisory: true},
 	}
 	tests := []struct {
 		name     string
@@ -163,7 +237,9 @@ func TestInputCommandsAndInspectJSON(t *testing.T) {
 	}{
 		{"input-list-json", []string{"input", "list", "--monitor", "mon-a", "--json"}, `"inputs"`},
 		{"input-get-json", []string{"input", "get", "--monitor", "mon-a", "--json"}, `"raw": 17`},
-		{"input-get-text", []string{"input", "probe", "--monitor", "mon-a"}, "hdmi-1 (raw 0x11)"},
+		{"input-get-text", []string{"input", "get", "--monitor", "mon-a"}, "hdmi-1 (raw 0x11)"},
+		{"input-detect-text", []string{"input", "probe", "--monitor", "mon-a"}, "0x11\thdmi-1\tprofile\ttrue"},
+		{"input-detect-json", []string{"input", "capabilities", "--monitor", "mon-a", "--json"}, `"input_source_advertised": true`},
 		{"input-set-json", []string{"input", "set", "--monitor", "mon-a", "--input", "hdmi-2", "--json"}, `"result"`},
 		{"inspect", []string{"inspect", "--all", "--json"}, `"generation": 9`},
 	}
@@ -210,6 +286,7 @@ func TestCommandParsingAndDiscoveryFailures(t *testing.T) {
 		{"input-unknown", []string{"input", "unknown"}, 2},
 		{"input-list-invalid", []string{"input", "list"}, 2},
 		{"input-get-invalid", []string{"input", "get"}, 2},
+		{"input-detect-invalid", []string{"input", "detect"}, 2},
 		{"input-set-invalid", []string{"input", "set"}, 2},
 		{"inspect-invalid", []string{"inspect"}, 2},
 		{"diagnose-invalid", []string{"diagnose"}, 2},

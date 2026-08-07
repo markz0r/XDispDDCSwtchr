@@ -3,12 +3,15 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/markz0r/XDispDDCSwtchr/internal/ddc"
 	"github.com/markz0r/XDispDDCSwtchr/internal/monitor"
 	"github.com/markz0r/XDispDDCSwtchr/internal/profiles"
+	"github.com/markz0r/XDispDDCSwtchr/internal/qualification"
 	"github.com/markz0r/XDispDDCSwtchr/internal/testutil"
 )
 
@@ -82,6 +85,225 @@ func TestGetAndSwitchInput(t *testing.T) {
 	}
 	if result.Verification != monitor.VerificationConfirmed || backend.Inputs[ref.ID] != 0x11 {
 		t.Fatalf("result=%+v input=%x", result, backend.Inputs[ref.ID])
+	}
+}
+
+func TestDetectInputsUsesProfileThenMCCSAndNeverExpandsQualification(t *testing.T) {
+	svc, backend, ref := newTestService(t)
+	backend.Capabilities = map[string]string{
+		ref.ID: "(prot(monitor)cmds(01 02 03 E3 F3)vcp(10 60(1B 0F 11 12 19) DF))",
+	}
+	report, err := svc.DetectInputs(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Advisory || !report.InputSourceAdvertised || report.Raw == "" || len(report.Inputs) != 5 {
+		t.Fatalf("unexpected report: %+v", report)
+	}
+	want := []monitor.InputCandidate{
+		{Raw: 0x1b, Logical: monitor.InputUSBC1, MappingSource: monitor.InputMappingProfile, WriteQualified: true},
+		{Raw: 0x0f, Logical: monitor.InputDisplayPort1, MappingSource: monitor.InputMappingProfile},
+		{Raw: 0x11, Logical: monitor.InputHDMI1, MappingSource: monitor.InputMappingProfile, WriteQualified: true},
+		{Raw: 0x12, Logical: monitor.InputHDMI2, MappingSource: monitor.InputMappingMCCSStandard},
+		{Raw: 0x19, MappingSource: monitor.InputMappingUnmapped},
+	}
+	for index := range want {
+		if report.Inputs[index] != want[index] {
+			t.Fatalf("candidate[%d]=%+v want %+v", index, report.Inputs[index], want[index])
+		}
+	}
+	if backend.CapabilitiesCalls != 1 || len(backend.SetCalls) != 0 {
+		t.Fatalf("capability_calls=%d writes=%+v", backend.CapabilitiesCalls, backend.SetCalls)
+	}
+}
+
+func TestDetectInputsWorksForUnprofiledMonitorAndReportsCapabilityErrors(t *testing.T) {
+	registry, _ := profiles.NewRegistry()
+	backend := &testutil.FakeBackend{
+		Descriptors:  []monitor.Descriptor{{ID: "unknown", Manufacturer: "ACM", ProductCode: 1, Model: "Unknown", BackendName: "fake"}},
+		Inputs:       map[string]uint16{"unknown": 0x11},
+		Capabilities: map[string]string{"unknown": "(vcp(60(0F 11 1B)))"},
+	}
+	svc := New(backend, registry, &profiles.SupportMatrix{SchemaVersion: 1}, profiles.Platform{})
+	snapshot, err := svc.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := monitor.MonitorRef{ID: "unknown", Generation: snapshot.Generation}
+	report, err := svc.DetectInputs(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Inputs) != 3 || report.Inputs[0].Logical != monitor.InputDisplayPort1 ||
+		report.Inputs[1].Logical != monitor.InputHDMI1 || report.Inputs[2].MappingSource != monitor.InputMappingUnmapped {
+		t.Fatalf("unexpected unprofiled report: %+v", report)
+	}
+
+	backend.CapabilitiesError = monitor.ErrTransactionTimeout
+	if _, err := svc.DetectInputs(context.Background(), ref); !errors.Is(err, monitor.ErrTransactionTimeout) {
+		t.Fatalf("capability error changed: %v", err)
+	}
+}
+
+func TestApproveInputsPersistsExactUserQualificationAndEnablesReviewedMappings(t *testing.T) {
+	descriptor := monitor.Descriptor{
+		ID: "unknown", Manufacturer: "ACM", ProductCode: 1, Model: "Unknown",
+		EDIDSHA256: strings.Repeat("a", 64), Connector: "display-service:42", BackendName: "fake",
+	}
+	backend := &testutil.FakeBackend{
+		Descriptors: []monitor.Descriptor{descriptor}, Inputs: map[string]uint16{"unknown": 0x11},
+		Capabilities: map[string]string{"unknown": "(prot(monitor)vcp(60(0F 11 1B)))"},
+	}
+	registry, _ := profiles.NewRegistry()
+	svc := New(backend, registry, &profiles.SupportMatrix{SchemaVersion: 1}, profiles.Platform{})
+	svc.SetSleeperForTest(noSleep{})
+	svc.SetClockForTest(fixedClock{now: time.Unix(100, 0)})
+	var saved qualification.Record
+	if err := svc.ConfigureUserQualifications(nil, func(record qualification.Record) error {
+		saved = record
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := svc.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := monitor.MonitorRef{ID: descriptor.ID, Generation: snapshot.Generation}
+	mappings := []monitor.InputValue{
+		{Logical: monitor.InputHDMI1, Raw: 0x11},
+		{Logical: monitor.InputUSBC1, Raw: 0x1b},
+	}
+	if err := svc.ApproveInputs(context.Background(), ref, mappings); err != nil {
+		t.Fatal(err)
+	}
+	if saved.MonitorID != descriptor.ID || saved.EDIDSHA256 != descriptor.EDIDSHA256 || !saved.AcceptedAt.Equal(time.Unix(100, 0)) {
+		t.Fatalf("unexpected persisted record: %+v", saved)
+	}
+	if len(backend.SetCalls) != 0 {
+		t.Fatalf("approval wrote to the monitor: %+v", backend.SetCalls)
+	}
+	if got := svc.Snapshot().Monitors[0]; got.SupportState != monitor.SupportUserQualified || got.ProfileName != "user-qualified/Unknown" {
+		t.Fatalf("unexpected approved descriptor: %+v", got)
+	}
+	inputs, err := svc.Inputs(ref)
+	if err != nil || len(inputs) != 2 {
+		t.Fatalf("inputs=%+v err=%v", inputs, err)
+	}
+	if _, err := svc.Switch(context.Background(), ref, monitor.InputDisplayPort1); !errors.Is(err, monitor.ErrUnknownInput) {
+		t.Fatalf("skipped candidate became switchable: %v", err)
+	}
+	result, err := svc.Switch(context.Background(), ref, monitor.InputUSBC1)
+	if err != nil || result.Verification != monitor.VerificationConfirmed || backend.Inputs[ref.ID] != 0x1b {
+		t.Fatalf("result=%+v input=0x%x err=%v", result, backend.Inputs[ref.ID], err)
+	}
+	report, err := svc.DetectInputs(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Inputs[1].MappingSource != monitor.InputMappingUserQualification || !report.Inputs[1].WriteQualified ||
+		report.Inputs[0].WriteQualified {
+		t.Fatalf("unexpected post-approval candidates: %+v", report.Inputs)
+	}
+	backend.Capabilities[ref.ID] = "(vcp(60(11 1B)))"
+	if _, err := svc.Switch(context.Background(), ref, monitor.InputHDMI1); !errors.Is(err, monitor.ErrUserQualificationStale) {
+		t.Fatalf("changed capabilities did not invalidate local qualification: %v", err)
+	}
+	if len(backend.SetCalls) != 1 {
+		t.Fatalf("stale local qualification wrote to monitor: %+v", backend.SetCalls)
+	}
+}
+
+func TestApproveInputsRejectsUnadvertisedAmbiguousAndUnpersistedMappings(t *testing.T) {
+	descriptor := monitor.Descriptor{
+		ID: "unknown", Manufacturer: "ACM", ProductCode: 1, Model: "Unknown",
+		EDIDSHA256: strings.Repeat("a", 64), Connector: "direct", BackendName: "fake",
+	}
+	newService := func(t *testing.T, saver func(qualification.Record) error) (*Service, *testutil.FakeBackend, monitor.MonitorRef) {
+		t.Helper()
+		backend := &testutil.FakeBackend{Descriptors: []monitor.Descriptor{descriptor}, Inputs: map[string]uint16{"unknown": 0x11}, Capabilities: map[string]string{"unknown": "(vcp(60(11 12)))"}}
+		registry, _ := profiles.NewRegistry()
+		svc := New(backend, registry, &profiles.SupportMatrix{SchemaVersion: 1}, profiles.Platform{})
+		if err := svc.ConfigureUserQualifications(nil, saver); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := svc.Discover(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return svc, backend, monitor.MonitorRef{ID: descriptor.ID, Generation: snapshot.Generation}
+	}
+
+	tests := []struct {
+		name     string
+		mappings []monitor.InputValue
+	}{
+		{"unadvertised", []monitor.InputValue{{Logical: monitor.InputDisplayPort1, Raw: 0x0f}}},
+		{"unknown-logical", []monitor.InputValue{{Logical: "vga-1", Raw: 0x11}}},
+		{"duplicate-logical", []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}, {Logical: monitor.InputHDMI1, Raw: 0x12}}},
+		{"empty", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := false
+			svc, backend, ref := newService(t, func(qualification.Record) error { saved = true; return nil })
+			if err := svc.ApproveInputs(context.Background(), ref, tt.mappings); err == nil {
+				t.Fatal("unsafe mapping was accepted")
+			}
+			if saved || len(backend.SetCalls) != 0 || svc.Snapshot().Monitors[0].SupportState == monitor.SupportUserQualified {
+				t.Fatalf("unsafe approval changed state: saved=%v writes=%+v", saved, backend.SetCalls)
+			}
+		})
+	}
+
+	svc, _, ref := newService(t, nil)
+	if err := svc.ApproveInputs(context.Background(), ref, []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}}); !errors.Is(err, monitor.ErrQualificationUnavailable) {
+		t.Fatalf("missing saver error=%v", err)
+	}
+	persistErr := errors.New("disk full")
+	svc, _, ref = newService(t, func(qualification.Record) error { return persistErr })
+	if err := svc.ApproveInputs(context.Background(), ref, []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}}); !errors.Is(err, persistErr) {
+		t.Fatalf("persistence error=%v", err)
+	}
+	if svc.Snapshot().Monitors[0].SupportState == monitor.SupportUserQualified {
+		t.Fatal("failed persistence enabled the monitor")
+	}
+}
+
+func TestDiscoverLoadsOnlyExactUserQualificationAndDoesNotOverrideReleaseSupport(t *testing.T) {
+	descriptor := monitor.Descriptor{
+		ID: "mon", Manufacturer: "DEL", ProductCode: 0x4308, Model: "DELL U4025QW",
+		EDIDSHA256: strings.Repeat("a", 64), Connector: "direct", BackendName: "fake",
+	}
+	record, err := qualification.New(descriptor, []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}}, "(vcp(60(11)))", time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, _ := profiles.NewRegistry()
+	backend := &testutil.FakeBackend{Descriptors: []monitor.Descriptor{descriptor}, Inputs: map[string]uint16{"mon": 0x11}}
+	svc := New(backend, registry, &profiles.SupportMatrix{SchemaVersion: 1}, profiles.Platform{})
+	if err := svc.ConfigureUserQualifications([]qualification.Record{record}, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := svc.Discover(context.Background())
+	if err != nil || snapshot.Monitors[0].SupportState != monitor.SupportUserQualified {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
+	}
+
+	backend.Descriptors[0].Connector = "dock"
+	snapshot, err = svc.Discover(context.Background())
+	if err != nil || snapshot.Monitors[0].SupportState != monitor.SupportBackendExperimental {
+		t.Fatalf("mismatched endpoint was accepted: snapshot=%+v err=%v", snapshot, err)
+	}
+	backend.Descriptors[0] = descriptor
+	backend.Descriptors[0].IdentityState = monitor.IdentityAmbiguous
+	snapshot, err = svc.Discover(context.Background())
+	if err != nil || snapshot.Monitors[0].SupportState != monitor.SupportAmbiguous {
+		t.Fatalf("ambiguous identity was locally qualified: snapshot=%+v err=%v", snapshot, err)
+	}
+	ref := monitor.MonitorRef{ID: descriptor.ID, Generation: snapshot.Generation}
+	if err := svc.ApproveInputs(context.Background(), ref, []monitor.InputValue{{Logical: monitor.InputHDMI1, Raw: 0x11}}); !errors.Is(err, monitor.ErrAmbiguousMonitor) {
+		t.Fatalf("ambiguous identity approval error=%v", err)
 	}
 }
 
@@ -166,7 +388,7 @@ func TestDiscoverClassifiesUnprofiledAndInvalidQualification(t *testing.T) {
 	}, Inputs: map[string]uint16{"dell": 0x19}}
 	matrix := &profiles.SupportMatrix{SchemaVersion: 1, Records: []profiles.SupportRecord{{
 		ID: "invalid", OS: "test", Architecture: "test", OSVersion: "1", OSBuild: "1", Backend: "fake", ApplicationCommit: "commit",
-		Profile: "Dell U4025QW", EDIDSHA256: "hash", Connector: "test", Inputs: []string{"hdmi-1"}, Verification: profiles.VerifyImmediate,
+		Profile: "Dell U4025QW", EDIDSHA256: "hash", Connector: "test", Inputs: []string{"usb-c-2"}, Verification: profiles.VerifyImmediate,
 		QualificationRecord: "evidence", EvidenceSHA256: "hash",
 	}}}
 	svc := New(backend, registry, matrix, profiles.Platform{OS: "test", Architecture: "test", Version: "1", Build: "1", ApplicationCommit: "commit"})
@@ -261,6 +483,41 @@ func TestSwitchVerificationTransitionsAndFailureBoundaries(t *testing.T) {
 		backend.GetErrors = []error{monitor.ErrPermissionDenied}
 		if _, err := svc.Switch(context.Background(), ref, monitor.InputHDMI2); !errors.Is(err, monitor.ErrPermissionDenied) {
 			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("successful-write-with-malformed-readback-is-assumed-once", func(t *testing.T) {
+		svc, backend, ref := newVariant(t, profiles.VerifyImmediate)
+		rawReply := []byte{0x00, 0x60, 0x00, 0x19, 0x19, 0x19, 0x19, 0x00, 0x00, 0x00, 0x00}
+		_, readErr := ddc.ParseGetVCPReply(rawReply, ddc.VCPInputSource)
+		backend.GetErrors = []error{readErr, readErr}
+		result, err := svc.Switch(context.Background(), ref, monitor.InputHDMI2)
+		if err != nil {
+			t.Fatalf("switch: %v", err)
+		}
+		if result.Verification != monitor.VerificationAssumedSuccess || result.Observed != nil {
+			t.Fatalf("result=%+v", result)
+		}
+		if result.VerificationAttempts != 2 || result.VerificationIssue == nil || result.VerificationIssue.Category != monitor.VerificationIssueMalformedReply {
+			t.Fatalf("verification diagnostic=%+v", result)
+		}
+		if result.VerificationIssue.RawReplyHex != "0060001919191900000000" {
+			t.Fatalf("raw reply=%q", result.VerificationIssue.RawReplyHex)
+		}
+		if len(backend.SetCalls) != 1 {
+			t.Fatalf("set calls=%d, want exactly one", len(backend.SetCalls))
+		}
+	})
+
+	t.Run("successful-write-with-read-unsupported-is-assumed", func(t *testing.T) {
+		svc, backend, ref := newVariant(t, profiles.VerifyImmediate)
+		backend.GetErrors = []error{monitor.ErrReadUnsupported}
+		result, err := svc.Switch(context.Background(), ref, monitor.InputHDMI2)
+		if err != nil || result.Verification != monitor.VerificationAssumedSuccess || result.VerificationAttempts != 1 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+		if result.VerificationIssue == nil || result.VerificationIssue.Category != monitor.VerificationIssueReadUnsupported {
+			t.Fatalf("issue=%+v", result.VerificationIssue)
 		}
 	})
 
